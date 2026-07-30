@@ -6,6 +6,54 @@
 
 ---
 
+## [v4.3.0] - 2026-07-30
+
+### 文档重写 + P2 优化项完成
+
+#### 文档重写
+
+- **README.md**：精简为核心功能说明
+- **快速配置指南.md**：简化为快速上手指南
+- **架构设计文档.md**：精简为当前架构状态（移除待修复内容）
+- **CUDA安装指南.md**：简化为标准安装流程
+- **调参文档.md**：简化为损失函数调参指南
+- **算法报告.md**：精简为核心算法原理
+
+#### 评估函数增强
+
+- **`eval_checkpoint()` 从检查点加载配置**
+  - 从检查点的 `config` 字典读取 task、image_size、variant 等参数
+  - 回退机制：检查点无配置时从文件名推断
+  - 确保评估配置与训练配置一致
+
+- **`ResultsComparator` 传递 image_size**
+  - `_eval_checkpoint()` 增加 `image_size` 参数
+  - 从 TrainingCommand 获取 image_size，传递给评估函数
+
+- **批量评估修复**
+  - 修复 Windows 下的编码问题（使用 UTF-8 + errors='replace'）
+  - JSON 解析失败时输出警告而非静默跳过
+  - 批量评估现在返回正确指标（不再是全0）
+
+#### 交互界面增强
+
+- **配置保存/加载功能**
+  - 重命名 `launcher.load_config()` → `load_command_config()`
+  - 避免与 `utils.config.load_config()` 混淆
+  - 主菜单添加 [l] 加载配置、[s] 保存配置 选项
+
+- **消融结果表格格式优化**
+  - 使用展平数据直接打印，修复嵌套字典格式问题
+  - 清晰展示所有变体的 R²、RMSE、MAE、mIoU、违反率
+
+#### 代码质量
+
+- **修复 `get_arch_suggestions()` 返回字段名**
+  - `seq_mode` → `seq_interp_mode`
+  - 与实际参数名保持一致
+
+---
+
 ## [v4.2.1] - 2026-07-30
 
 ### 新增：批量训练与对比工具

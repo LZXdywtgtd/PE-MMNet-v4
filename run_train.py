@@ -425,16 +425,43 @@ def evaluate_model(model, device, data_roots=None, predict_offset=0,
         }
 
 
-def eval_checkpoint(checkpoint_path, device, image_size=256):
-    """评估检查点"""
+def eval_checkpoint(checkpoint_path, device, image_size=None):
+    """评估检查点
+
+    Args:
+        checkpoint_path: 检查点路径
+        device: 计算设备
+        image_size: 图像尺寸（如果为 None，从检查点读取）
+    """
     print_info(f"加载模型: {checkpoint_path}")
 
-    # 从检查点文件名推断任务类型
-    task = 'detection'
+    # 加载检查点
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    # 处理检查点格式，获取配置
+    if isinstance(checkpoint, dict):
+        if 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        elif 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+        else:
+            state_dict = checkpoint
+        # 尝试从检查点获取配置
+        saved_config = checkpoint.get('config', {})
+    else:
+        state_dict = checkpoint
+        saved_config = {}
+
+    # 从检查点或参数获取任务类型
+    task = saved_config.get('task', 'detection')
     if 'tasksegmentation' in checkpoint_path:
         task = 'segmentation'
     elif 'taskmultitask' in checkpoint_path:
         task = 'multitask'
+
+    # 从检查点或参数获取图像尺寸
+    if image_size is None:
+        image_size = saved_config.get('image_size', 512)
 
     # 尝试确定模型类型
     variant_key = None
@@ -442,14 +469,10 @@ def eval_checkpoint(checkpoint_path, device, image_size=256):
         if key in os.path.basename(checkpoint_path):
             variant_key = key
             break
-
     if variant_key is None:
-        variant_key = 'full'
-        ModelClass = PETSNetMultimodal
-    else:
-        ModelClass = VARIANT_MODELS[variant_key]
+        variant_key = saved_config.get('variant', 'full')
 
-    # 创建并加载模型（根据任务类型）
+    # 创建模型
     if variant_key == 'full':
         model = PETSNetMultimodal(
             seq_len=300,
@@ -459,17 +482,8 @@ def eval_checkpoint(checkpoint_path, device, image_size=256):
             task=task
         )
     else:
+        ModelClass = VARIANT_MODELS.get(variant_key, PETSNetMultimodal)
         model = ModelClass()
-
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-
-    # 处理检查点格式
-    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        state_dict = checkpoint['model_state_dict']
-    elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-        state_dict = checkpoint['state_dict']
-    else:
-        state_dict = checkpoint
 
     # 加载权重
     model_dict = model.state_dict()
@@ -1102,14 +1116,17 @@ def main():
 
         print_title("消融实验完成")
 
-        # 打印汇总结果表格
-        print_results_table({k: {
-            'R2': v['r2'],
-            'RMSE': v['rmse'],
-            'MAE': v['mae'],
-            'mIoU': v['mIoU'],
-            '违反率': (v['violation_rate'] * 100, ".1f", "%"),
-        } for k, v in results.items()})
+        # 打印汇总结果表格（展平数据）
+        print()
+        print("  " + "=" * 80)
+        print("  " + "消融实验结果汇总")
+        print("  " + "=" * 80)
+        print()
+        print(f"  {'变体':<20} {'R²':>8} {'RMSE':>8} {'MAE':>8} {'mIoU':>8} {'违反率':>8}")
+        print("  " + "-" * 80)
+        for k, v in results.items():
+            print(f"  {VARIANT_DISPLAY_NAMES.get(k, k):<20} {v['r2']:>8.4f} {v['rmse']:>8.4f} {v['mae']:>8.4f} {v['mIoU']:>8.4f} {v['violation_rate']*100:>7.1f}%")
+        print("  " + "=" * 80)
 
         print_info(f"总耗时: {total_time/60:.1f}分钟")
 

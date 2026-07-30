@@ -1,154 +1,158 @@
 # CUDA 安装指南
 
-> **GPU 加速训练配置**
->
-> 本文档提供三套 AI 提示词，复制给任意 AI 助手即可获得量身定制的安装指导。
+> GPU 加速训练配置
 
 ---
 
-## 一、使用方法
+## 一、环境要求
 
-网络 AI 无法直接运行你电脑里的命令，但可以充当**技术顾问**。
-
-**正确的交互方式**：
-1. 复制下方提示词 → 发给 AI 助手
-2. AI 告诉你运行什么命令 → 你把输出结果粘贴给 AI
-3. AI 根据结果给出下一步指令 → 你执行后继续反馈
+- NVIDIA 显卡（支持 CUDA）
+- 驱动版本 ≥ 450.80（支持 CUDA 11.x）
 
 ---
 
-## 二、AI 提示词模板
+## 二、验证 GPU
 
-### 提示词 A：检查 GPU 和安装 CUDA
-
-> 请复制以下全部内容发送给 AI 助手，它会引导你完成环境配置。
->
-> 注意：你需要自己运行终端命令并将输出结果复制粘贴给 AI。
-
+```powershell
+nvidia-smi
 ```
-我需要在我的 Windows 电脑上配置深度学习 GPU 环境。请你充当我的"技术顾问"，我负责执行命令并把结果发给你，你根据我的实际情况给出下一步的具体操作指令。
 
-请按以下步骤指导我：
-
-## 第一步：检查硬件
-请你告诉我，我需要打开什么工具（例如 PowerShell），并输入什么命令。
-我运行完后，会把终端里的输出结果粘贴给你。
-拿到我的结果后，请告诉我：
-1. 我的显卡型号是什么？
-2. 我的 NVIDIA 驱动版本是什么？
-3. 当前驱动最高支持到哪个 CUDA 版本？
-
-## 第二步：安装/更新驱动（如果需要）
-根据我发给你的结果，如果驱动版本过低，请你告诉我：
-1. 我应该去 NVIDIA 官网的哪个具体页面下载驱动？
-2. 下载时我应该选择什么版本的驱动？
-3. 如果驱动已经够用，就直接告诉我"无需更新驱动"。
-
-## 第三步：安装 CUDA Toolkit
-根据我的显卡驱动支持的最高版本，请你：
-1. 推荐一个最适合我的 CUDA Toolkit 版本（比如 11.8 或 12.1）。
-2. 给我具体的 NVIDIA 官网下载链接和步骤。
-3. 特别提醒我在安装时需要注意什么（比如取消勾选某些选项）。
-
-## 第四步：验证安装
-安装完成后，请你告诉我运行什么命令来验证 CUDA 是否安装成功。
-我运行后会再次把结果发给你，你再帮我确认 CUDA 有没有装好。
-
-请用中文回答，给出清晰的步骤编号。
+**预期输出**：
+```
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 525.xx    Driver Version: 525.xx    CUDA Version: 12.0        |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+|   0  NVIDIA GeForce ...  Off  | 00000000:01:00.0  On |                  0 MiB |
++-----------------------------------------------------------------------------+
 ```
 
 ---
 
-### 提示词 B：安装 PyTorch GPU 版本
+## 三、安装 CUDA Toolkit
 
-> 请复制以下内容发送给 AI 助手，它会帮你匹配 PyTorch 版本。
->
-> 注意：先修改括号内容，填入你实际安装的 CUDA 版本号。
+### 3.1 下载
 
-```
-我已经根据你的指导，在我的 Windows 电脑上安装好了 CUDA [**请手动修改这里的括号内容，填入你实际安装的 CUDA 版本号，比如 11.8**]。
+访问 [NVIDIA CUDA 下载](https://developer.nvidia.com/cuda-downloads)，选择：
+- Windows > x86_64 > 11 > exe(local)
 
-现在请你帮我安装对应的 PyTorch GPU 版本：
+### 3.2 安装
 
-## 任务
-1. 请你告诉我，我应该去 PyTorch 官网的哪个页面，或者直接给我一个可以在命令行里复制粘贴运行的安装命令（pip 格式）。
-2. 请确保命令里的 --index-url 参数与我安装的 CUDA 版本完全对应。
+1. 运行安装程序
+2. 选择 **自定义安装**
+3. 取消勾选 **GeForce Experience**（不需要）
+4. 完成安装
 
-## 安装后验证
-安装完成后，请你告诉我一段 Python 测试代码，让我运行。
+### 3.3 验证
 
-我会把这段 Python 代码运行的结果发给你，请你帮我确认：
-1. PyTorch 版本是否正确。
-2. 返回的 torch.cuda.is_available() 是 True 还是 False。
-
-如果结果是 False，请你排查原因并告诉我，我需要卸载重装哪个版本，或者修改什么环境变量。
+```powershell
+nvcc --version
 ```
 
----
-
-### 提示词 C：一键排查问题
-
-> 当遇到报错或无法运行 CUDA 时，复制以下内容发给 AI。
->
-> 注意：先修改括号内容，填入你遇到的报错信息。
-
+**预期输出**：
 ```
-我的深度学习环境出了以下问题：
-
-[**请把这里替换为你遇到的报错信息或问题描述**]
-
-请你帮我排查。我会按你的指示去执行以下三个命令，并依次把结果发给你：
-1. nvidia-smi (我用这个检查驱动)
-2. nvcc --version (我用这个检查 CUDA 编译器)
-3. python -c "import torch; print(torch.cuda.is_available())" (我用这个检查 PyTorch)
-
-收到我的三个结果后，请你：
-1. 分析哪个环节出了问题。
-2. 告诉我具体的解决步骤（比如"你的驱动支持 CUDA 12.1，但你安装了 CUDA 11.8，请卸载并重装"）。
-3. 如果问题复杂，请告诉我需要提供哪些额外的报错信息。
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2023 NVIDIA Corporation
+Built on ...
+Cuda compilation tools, release 11.x, V11.x.x
 ```
 
 ---
 
-## 三、不想装 GPU 怎么办？
+## 四、安装 PyTorch GPU 版本
 
-**没问题，CPU 也可以运行！**
+### 4.1 访问 PyTorch 官网
 
-只是训练速度会慢一些（可能慢 10-50 倍）。
+访问 [pytorch.org](https://pytorch.org/)，使用官方命令生成器：
 
-安装 CPU 版本（直接复制运行）：
+1. 选择 PyTorch 版本（如 2.0.1）
+2. 选择 CUDA 版本（如 11.8）
+3. 复制生成的命令
+
+### 4.2 常用安装命令
+
+**CUDA 11.8**：
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+```
+
+**CUDA 12.1**：
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+```
+
+### 4.3 CPU 版本（无 GPU）
+
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ```
 
-代码会自动检测并使用 CPU，无需修改任何设置。
+---
+
+## 五、验证安装
+
+```bash
+python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}'); print(f'Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"CPU\"}')"
+```
+
+**预期输出**：
+```
+PyTorch: 2.0.1
+CUDA: True
+Device: NVIDIA GeForce RTX 3080
+```
 
 ---
 
-## 四、快速验证命令
+## 六、常见问题
 
-以下命令可用于验证安装，复制给 AI 帮你检查：
+### Q1: `nvidia-smi` 不是内部命令
 
-```
-我运行了以下命令，请帮我检查环境是否正常：
-1. nvidia-smi - [粘贴输出]
-2. nvcc --version - [粘贴输出]
-3. python -c "import torch; print(torch.__version__, torch.cuda.is_available())" - [粘贴输出]
-```
+**原因**：未安装 NVIDIA 驱动
 
----
+**解决**：安装 [NVIDIA GeForce Experience](https://www.nvidia.com/geforce/geforce-experience/) 或单独下载驱动
 
-## 附录：常见验证命令
+### Q2: `torch.cuda.is_available()` 返回 False
 
-如果你想自己检查，而不是问 AI，可以用这些命令：
+**可能原因**：
+1. 未安装 GPU 版 PyTorch
+2. CUDA 版本不匹配
+3. 驱动版本过低
 
-```powershell
-# 检查显卡驱动
+**解决**：
+```bash
+# 检查驱动支持的 CUDA 版本
 nvidia-smi
 
-# 检查 CUDA 编译器版本
+# 检查已安装的 CUDA 编译器
 nvcc --version
 
-# 检查 PyTorch CUDA 状态
-python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA可用: {torch.cuda.is_available()}')"
+# 重新安装匹配的 PyTorch
+pip uninstall torch torchvision
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 ```
+
+### Q3: 训练速度很慢
+
+**检查**：
+1. 是否使用 GPU：`torch.cuda.is_available()` 应为 True
+2. 显存占用：`nvidia-smi` 查看 GPU-Util
+3. 数据加载是否在 GPU 上
+
+---
+
+## 七、驱动与 CUDA 版本对应
+
+| 驱动版本 | 最高支持 CUDA |
+|----------|---------------|
+| ≥ 525 | CUDA 12.x |
+| 450 ~ 524 | CUDA 11.x |
+| < 450 | 需更新驱动 |
+
+---
+
+## 八、不想用 GPU？
+
+没问题，代码支持 CPU 训练，只是速度较慢（可能慢 10-50 倍）。
+
+安装 CPU 版本后，代码会自动检测并使用 CPU，无需修改任何设置。

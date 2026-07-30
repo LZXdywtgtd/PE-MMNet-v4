@@ -20,12 +20,12 @@ import json
 
 # Windows 控制台编码修复
 if sys.platform == 'win32':
-    import io
     try:
+        import io
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-    except:
-        pass
+    except Exception:
+        pass  # 忽略编码修复失败
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
@@ -102,7 +102,7 @@ def get_arch_suggestions(backbone_2d='resnet18', backbone_1d='cnn_attn'):
         'lr': 0.001,
         'dropout': 0.2,
         'feature_len': 300,
-        'seq_mode': 'interpolate',
+        'seq_interp_mode': 'interpolate',  # 修复：seq_mode -> seq_interp_mode
     }
     if backbone_2d == 'vit_small':
         suggestions['lr'] = 0.0001
@@ -136,8 +136,8 @@ def save_config(config_list, filepath='config_launcher.json'):
         json.dump(config_list, f, indent=2, ensure_ascii=False)
 
 
-def load_config(filepath='config_launcher.json'):
-    """从 JSON 加载配置"""
+def load_command_config(filepath='config_launcher.json'):
+    """从 JSON 加载命令配置"""
     if os.path.exists(filepath):
         with open(filepath, 'r', encoding='utf-8') as f:
             return json.load(f)

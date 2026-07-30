@@ -59,6 +59,7 @@ session_commands.json
 # Benchmark 结果（可选保留）
 benchmark_results/*.json
 benchmark_results/table*.md
+benchmark_results/*_results.md
 !benchmark_results/README.md
 
 # 结果文件

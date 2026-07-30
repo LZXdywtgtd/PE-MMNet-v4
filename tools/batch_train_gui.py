@@ -27,11 +27,17 @@ from typing import List, Optional, Dict, Callable
 from enum import Enum
 from datetime import datetime
 
-# Windows 控制台编码修复
+# Windows 控制台编码修复 - 使用更安全的方式避免cleanup错误
 if sys.platform == 'win32':
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    try:
+        import io
+        # 仅在需要时修复编码，不要完全替换stdout/stderr对象
+        if sys.stdout is not None and hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        if sys.stderr is not None and hasattr(sys.stderr, 'reconfigure'):
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass  # 忽略编码修复失败
 
 # 添加项目路径
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -578,10 +584,15 @@ class BatchTrainer:
         if image_size is not None:
             args.extend(['--image_size', str(image_size)])
 
+        # Windows 上使用 UTF-8 编码读取输出
+        import locale
+        encoding = 'utf-8' if sys.platform == 'win32' else locale.getpreferredencoding()
+
         result = subprocess.run(
             args,
             capture_output=True,
-            text=True,
+            encoding=encoding,
+            errors='replace',  # 替换无法解码的字符
             cwd=PROJECT_ROOT
         )
 
@@ -592,7 +603,11 @@ class BatchTrainer:
             return {'r2': 0.0, 'rmse': 0.0, 'mae': 0.0, 'mIoU': 0.0, 'violation_rate': 0.0, 'dice': 0.0}
 
         # 解析输出获取指标
-        output = result.stdout
+        output = result.stdout if result else ""
+
+        # 处理 None 类型
+        if output is None:
+            output = ""
 
         # 优先从 JSON 行解析
         import re
@@ -604,8 +619,8 @@ class BatchTrainer:
                 metrics = json.loads(json_match.group(1))
                 print_info(f"评估完成: R²={metrics.get('r2', 0):.4f}, RMSE={metrics.get('rmse', 0):.4f}")
                 return metrics
-            except json.JSONDecodeError:
-                pass
+            except json.JSONDecodeError as e:
+                print_warning(f"JSON解析失败: {e}，使用正则解析")
 
         # 回退到正则解析
         ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
@@ -664,7 +679,9 @@ class ResultsComparator:
         results = []
         for cmd in self.commands:
             if cmd.actual_checkpoint_path and os.path.exists(cmd.actual_checkpoint_path):
-                metrics = self._eval_checkpoint(cmd.actual_checkpoint_path, cmd.task)
+                metrics = self._eval_checkpoint(
+                    cmd.actual_checkpoint_path, cmd.task, image_size=cmd.image_size
+                )
                 results.append({
                     'id': cmd.id,
                     'display_name': cmd.get_display_name(),
@@ -681,7 +698,7 @@ class ResultsComparator:
                 })
         return results
 
-    def _eval_checkpoint(self, ckpt_path: str, task: str) -> Dict:
+    def _eval_checkpoint(self, ckpt_path: str, task: str, image_size: int = None) -> Dict:
         """评估单个检查点"""
         # 动态导入
         import torch
@@ -690,7 +707,7 @@ class ResultsComparator:
 
         # 调用 run_train.py 的评估函数
         from run_train import eval_checkpoint
-        return eval_checkpoint(ckpt_path, device)
+        return eval_checkpoint(ckpt_path, device, image_size=image_size)
 
     def generate_table(self, results: List[Dict], sort_by: str = 'r2') -> str:
         """生成对比表格"""
@@ -1337,8 +1354,14 @@ def main():
             cli.trainer.add_command(cmd)
         print_success(f"已添加 {len(args.quick)} 条命令")
 
-        # 直接开始训练
-        cli._start_training()
+        # 直接开始训练（跳过交互确认）
+        try:
+            results = cli.trainer.execute_all()
+            print()
+            print_section("批量训练完成")
+            print_info(f"总计: {results['total']} | 成功: {results['success']} | 失败: {results['failed']} | 跳过: {results['skipped']}")
+        except Exception as e:
+            print_error(f"执行失败: {e}")
     else:
         # 启动交互式界面
         cli.run()

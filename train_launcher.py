@@ -31,7 +31,7 @@ os.chdir(PROJECT_ROOT)
 from launcher import (
     PRESETS, SEGMENTATION_PRESETS, MULTITASK_PRESETS, ABLATION_PRESETS,
     interactive_mode, run_ablation_menu, build_command, save_config,
-    queue_config_wizard
+    queue_config_wizard, load_command_config
 )
 
 # 导入批量训练模块
@@ -88,7 +88,8 @@ def main():
             print("  [r] ▶ 开始批量训练")
             print("  [v] 查看队列")
             print("  [c] 清空队列")
-            print()
+        print("  [l] 加载配置")
+        print("  [s] 保存配置")
         print("  [q] 退出")
         print()
 
@@ -237,6 +238,53 @@ def main():
             if confirm == 'y':
                 cli.trainer.clear_commands()
                 print("队列已清空")
+            continue
+
+        elif choice == "l":
+            # 加载配置
+            config_list = load_command_config()
+            if config_list:
+                print(f"\n已加载 {len(config_list)} 条配置")
+                for args_list in config_list:
+                    cmd = build_command(args_list)
+                    tc = TrainingCommand.from_string(cmd)
+                    success, msg, _ = cli.trainer.add_command(tc, allow_duplicate=True)
+                    if success:
+                        print(f"  ✅ 已添加: {tc.get_display_name()}")
+                    else:
+                        print(f"  ⚠️ 已存在: {tc.get_display_name()}")
+                print(f"\n当前队列: {len(cli.trainer.commands)} 条命令")
+            else:
+                print("未找到保存的配置或加载失败")
+            continue
+
+        elif choice == "s":
+            # 保存配置
+            if len(cli.trainer.commands) > 0:
+                config_list = []
+                for cmd in cli.trainer.commands:
+                    # 从 TrainingCommand 转换为参数列表
+                    args_list = []
+                    for key, value in [
+                        ('--variant', cmd.variant),
+                        ('--backbone_2d', cmd.backbone_2d),
+                        ('--backbone_1d', cmd.backbone_1d),
+                        ('--fusion', cmd.fusion),
+                        ('--epochs', str(cmd.epochs)),
+                        ('--predict_offset', str(cmd.predict_offset)),
+                        ('--task', cmd.task),
+                        ('--image_size', str(cmd.image_size)),
+                        ('--lr', str(cmd.lr)),
+                        ('--dropout', str(cmd.dropout)),
+                    ]:
+                        if key == '--variant' and value == 'full':
+                            continue  # 跳过默认值
+                        args_list.extend([key, value])
+                    config_list.append(args_list)
+                save_config(config_list)
+                print(f"已保存 {len(config_list)} 条配置到 config_launcher.json")
+            else:
+                print("队列为空，无需保存")
             continue
 
         else:
