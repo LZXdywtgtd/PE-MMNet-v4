@@ -1,0 +1,110 @@
+name: 飞书通知
+
+on:
+  # push 到 main/master 分支时触发
+  push:
+    branches:
+      - master
+      - main
+  # 发布 Release 时触发
+  release:
+    types:
+      - published
+      - edited
+
+jobs:
+  feishu-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 发送飞书通知
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const webhook = '${{ secrets.FEISHU_WEBHOOK }}';
+            const repo = context.payload.repository?.full_name || 'LZXdywtgtd/PE-MMNet-v4';
+            const repoUrl = `https://github.com/${repo}`;
+
+            let title = '';
+            let content = '';
+            let color = '#3498db';
+
+            // 判断触发类型
+            if (context.eventName === 'release') {
+              // Release 事件
+              const tag = context.payload.release?.tag_name || '';
+              const releaseName = context.payload.release?.name || tag;
+              const body = context.payload.release?.body || '';
+              const isPrerelease = context.payload.release?.prerelease || false;
+
+              title = `🚀 ${isPrerelease ? '预发布' : '正式发布'} v${tag.replace('v', '')}`;
+              content = `**${releaseName}**\n\n${body.substring(0, 500)}${body.length > 500 ? '...' : ''}`;
+              color = isPrerelease ? '#f39c12' : '#27ae60';
+            } else {
+              // Push 事件
+              const branch = context.ref.replace('refs/heads/', '');
+              const commitMsg = context.payload.commits?.[0]?.message || '代码更新';
+              const commitSha = context.sha.substring(0, 7);
+              const author = context.payload.commits?.[0]?.author?.name || 'Unknown';
+
+              title = `📝 代码更新 - ${branch}`;
+              content = `**${commitMsg.split('\n')[0]}**\n\n` +
+                        `📌 提交: \`${commitSha}\`\n` +
+                        `👤 作者: ${author}\n` +
+                        `🌿 分支: ${branch}`;
+              color = '#3498db';
+            }
+
+            // 构建卡片消息
+            const card = {
+              msg_type: "interactive",
+              card: {
+                schema: "2.0",
+                config: {
+                  update_multi: true
+                },
+                header: {
+                  title: {
+                    tag: "plain_text",
+                    content: title
+                  },
+                  template: "blue"
+                },
+                body: {
+                  direction: "vertical",
+                  padding: "12px 12px 12px 12px",
+                  elements: [
+                    {
+                      tag: "markdown",
+                      content: content
+                    },
+                    {
+                      tag: "hr"
+                    },
+                    {
+                      tag: "div",
+                      text: {
+                        tag: "lark_md",
+                        content: `📦 **PE-MMNet-v4** | [查看代码](${repoUrl}) | [ Releases](${repoUrl}/releases)`
+                      }
+                    }
+                  ]
+                }
+              }
+            };
+
+            // 发送请求
+            const payload = JSON.stringify(card);
+            const response = await fetch(webhook, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: payload
+            });
+
+            if (!response.ok) {
+              console.error('飞书通知发送失败:', await response.text());
+              core.setFailed('飞书通知发送失败');
+            } else {
+              console.log('飞书通知发送成功');
+            }
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
