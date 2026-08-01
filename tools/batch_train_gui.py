@@ -27,17 +27,16 @@ from typing import List, Optional, Dict, Callable
 from enum import Enum
 from datetime import datetime
 
-# Windows 控制台编码修复 - 使用更安全的方式避免cleanup错误
+# Windows 控制台编码修复（使用安全方式）
 if sys.platform == 'win32':
     try:
         import io
-        # 仅在需要时修复编码，不要完全替换stdout/stderr对象
         if sys.stdout is not None and hasattr(sys.stdout, 'reconfigure'):
             sys.stdout.reconfigure(encoding='utf-8', errors='replace')
         if sys.stderr is not None and hasattr(sys.stderr, 'reconfigure'):
             sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
-        pass  # 忽略编码修复失败
+        pass
 
 # 添加项目路径
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

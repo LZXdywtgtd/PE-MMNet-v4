@@ -14,15 +14,6 @@ PE-MMNet v4 统一训练启动器
 import os
 import sys
 
-# Windows 控制台编码修复
-if sys.platform == 'win32':
-    import io
-    try:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-    except:
-        pass
-
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 os.chdir(PROJECT_ROOT)

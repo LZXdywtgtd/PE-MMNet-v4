@@ -36,18 +36,9 @@ COLOR_GRAY = "\033[90m"
 STYLE_BOLD = "\033[1m"
 STYLE_DIM = "\033[2m"
 
-# Windows 兼容性：检测并启用 ANSI 颜色支持
+# Windows 兼容性：启用 ANSI 颜色支持
 if sys.platform == "win32":
-    import io
-    # 方法1：尝试启用 Windows ANSI 支持
     os.system("")  # 启用 Windows ANSI 支持
-    # 方法2：如果 stdout 被包装，尝试解包
-    if isinstance(sys.stdout, io.TextIOWrapper):
-        try:
-            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-        except:
-            pass
 
 
 # =============================================================================
