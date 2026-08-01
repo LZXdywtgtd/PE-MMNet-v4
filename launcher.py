@@ -124,10 +124,39 @@ def validate_args(args_list):
 
 
 def build_command(args_list, is_ablation=False):
-    """构建完整命令"""
+    """构建完整命令
+
+    Args:
+        args_list: 参数列表
+        is_ablation: 是否为消融实验
+
+    Returns:
+        完整的命令字符串，自动选择正确的 Python 解释器
+    """
+    import subprocess
     validate_args(args_list)
     mode = "ablation" if is_ablation else "train"
-    return f"python run_train.py --mode {mode} {' '.join(args_list)}"
+
+    # 检测正确的 Python 解释器
+    # 优先使用 py Launcher（Windows 官方 Python Launcher）
+    python_cmd = "py"
+    try:
+        result = subprocess.run(
+            ["py", "-3", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0 and "Python" in result.stdout:
+            python_cmd = "py"
+        else:
+            # 降级为 python
+            python_cmd = "python"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        # 尝试使用 python
+        python_cmd = "python"
+
+    return f"{python_cmd} run_train.py --mode {mode} {' '.join(args_list)}"
 
 
 def save_config(config_list, filepath='config_launcher.json'):
