@@ -1,12 +1,10 @@
 name: 飞书通知
 
 on:
-  # push 到 main/master 分支时触发
   push:
     branches:
       - master
       - main
-  # 发布 Release 时触发
   release:
     types:
       - published
@@ -30,7 +28,6 @@ jobs:
 
             // 判断触发类型
             if (context.eventName === 'release') {
-              // Release 事件
               const tag = context.payload.release?.tag_name || '';
               const releaseName = context.payload.release?.name || tag;
               const body = context.payload.release?.body || '';
@@ -40,17 +37,35 @@ jobs:
               content = `**${releaseName}**\n\n${body.substring(0, 500)}${body.length > 500 ? '...' : ''}`;
               color = isPrerelease ? '#f39c12' : '#27ae60';
             } else {
-              // Push 事件
-              const branch = context.ref.replace('refs/heads/', '');
+              // ====== Push 事件 ======
               const commitMsg = context.payload.commits?.[0]?.message || '代码更新';
               const commitSha = context.sha.substring(0, 7);
               const author = context.payload.commits?.[0]?.author?.name || 'Unknown';
+              const branch = context.ref.replace('refs/heads/', '');
 
+              // 1. 拆分标题和正文
+              const lines = commitMsg.split('\n');
+              const subject = lines[0];
+              let body = lines.slice(1).join('\n').trim();
+
+              // 2. 截断正文（飞书卡片限制，保留前 1500 字符）
+              const MAX_BODY_LEN = 1500;
+              let bodyDisplay = '';
+              if (body) {
+                bodyDisplay = body.length > MAX_BODY_LEN
+                  ? body.substring(0, MAX_BODY_LEN) + '\n\n... (内容已截断，请查看 GitHub 完整提交)'
+                  : body;
+                // 用 Markdown 代码块包裹，保留缩进和标题格式
+                bodyDisplay = `\n\n📝 **详细变更:**\n\`\`\`\n${bodyDisplay}\n\`\`\``;
+              }
+
+              // 3. 组装完整内容
               title = `📝 代码更新 - ${branch}`;
-              content = `**${commitMsg.split('\n')[0]}**\n\n` +
+              content = `**${subject}**\n\n` +
                         `📌 提交: \`${commitSha}\`\n` +
                         `👤 作者: ${author}\n` +
-                        `🌿 分支: ${branch}`;
+                        `🌿 分支: ${branch}` +
+                        bodyDisplay;
               color = '#3498db';
             }
 
@@ -84,7 +99,7 @@ jobs:
                       tag: "div",
                       text: {
                         tag: "lark_md",
-                        content: `📦 **PE-MMNet-v4** | [查看代码](${repoUrl}) | [ Releases](${repoUrl}/releases)`
+                        content: `📦 **PE-MMNet-v4** | [查看代码](${repoUrl}) | [Releases](${repoUrl}/releases)`
                       }
                     }
                   ]
