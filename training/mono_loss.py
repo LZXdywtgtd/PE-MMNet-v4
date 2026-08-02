@@ -1029,3 +1029,148 @@ class DETRLoss(nn.Module):
 
         return loss_total
 
+
+# =============================================================================
+# 密度一致性损失
+# =============================================================================
+
+class DensityConsistencyLoss(nn.Module):
+    """
+    密度分布一致性损失
+
+    物理原理：
+    - 相邻网格的裂纹密度应该相近（空间平滑性）
+    - 裂纹是连续结构，相邻位置的密度不会有突变
+
+    实现：
+    - 对于每个正样本网格，计算其与3x3邻域内其他正样本网格的密度差异
+    - 邻域密度差异越小，一致性越好
+
+    使用方式：
+    ```python
+    density_loss = DensityConsistencyLoss(grid_size=16, neighbor_range=1)
+    loss = density_loss(grid_pred, positive_mask)
+    ```
+
+    Args:
+        grid_size: 网格尺寸（默认16，即16x16=256个网格）
+        neighbor_range: 邻域范围（默认1，即3x3邻域）
+        lambda_consistency: 一致性损失权重
+    """
+
+    def __init__(self, grid_size=16, neighbor_range=1, lambda_consistency=0.5):
+        super().__init__()
+        self.grid_size = grid_size
+        self.neighbor_range = neighbor_range
+        self.lambda_consistency = lambda_consistency
+
+    def forward(self, grid_pred, positive_mask):
+        """
+        计算密度一致性损失
+
+        Args:
+            grid_pred: 网格预测 (B, num_grids, 6)
+                      预测向量格式: [x, y, l, w, conf, density]
+                      我们只使用第5维（density）
+            positive_mask: 正样本掩码 (B, num_grids)
+                          True表示该网格包含真实目标
+
+        Returns:
+            一致性损失标量
+        """
+        # 提取密度预测
+        density = grid_pred[..., 5]  # (B, num_grids)
+
+        neighbor_loss = 0.0
+        count = 0
+
+        for b in range(density.size(0)):
+            # 获取当前批次中所有正样本的索引
+            pos_indices = positive_mask[b].nonzero(as_tuple=True)[0]
+
+            for idx in pos_indices:
+                # 将扁平索引转换为2D坐标
+                i, j = idx // self.grid_size, idx % self.grid_size
+
+                # 收集邻域内的正样本密度值
+                neighbors = []
+                for di in range(-self.neighbor_range, self.neighbor_range + 1):
+                    for dj in range(-self.neighbor_range, self.neighbor_range + 1):
+                        if di == 0 and dj == 0:
+                            continue  # 跳过自身
+
+                        ni, nj = i + di, j + dj
+                        # 检查边界
+                        if 0 <= ni < self.grid_size and 0 <= nj < self.grid_size:
+                            n_idx = ni * self.grid_size + nj
+                            # 检查邻域是否也是正样本
+                            if positive_mask[b, n_idx]:
+                                neighbors.append(density[b, n_idx])
+
+                # 计算与邻域的一致性损失
+                if neighbors:
+                    center_density = density[b, idx].expand(len(neighbors))
+                    neighbor_loss += F.mse_loss(
+                        center_density,
+                        torch.stack(neighbors)
+                    )
+                    count += 1
+
+        # 平均损失
+        if count > 0:
+            neighbor_loss = neighbor_loss / count
+
+        return self.lambda_consistency * neighbor_loss
+
+
+class CombinedDensityLoss(nn.Module):
+    """
+    组合密度损失
+
+    结合MSE密度损失和一致性损失，用于YOLO/DETR变体。
+
+    总损失：
+    L_density = λ_mse * L_mse + λ_consistency * L_consistency
+    """
+
+    def __init__(self, grid_size=16, neighbor_range=1,
+                 lambda_mse=1.0, lambda_consistency=0.5):
+        super().__init__()
+        self.lambda_mse = lambda_mse
+        self.lambda_consistency = lambda_consistency
+        self.consistency_loss = DensityConsistencyLoss(
+            grid_size=grid_size,
+            neighbor_range=neighbor_range,
+            lambda_consistency=1.0  # 内部权重设为1，在forward中乘以外部权重
+        )
+
+    def forward(self, grid_pred, target, positive_mask):
+        """
+        计算组合密度损失
+
+        Args:
+            grid_pred: 预测 (B, num_grids, 6)
+            target: 目标 (B, num_grids, 6) - 分配后的目标
+            positive_mask: 正样本掩码 (B, num_grids)
+
+        Returns:
+            总损失
+        """
+        # MSE密度损失（仅在正样本上计算）
+        pred_density = grid_pred[..., 5]  # (B, num_grids)
+        target_density = target[..., 5]  # (B, num_grids)
+
+        # 只在正样本上计算MSE
+        if positive_mask.any():
+            loss_mse = F.mse_loss(
+                pred_density[positive_mask],
+                target_density[positive_mask]
+            )
+        else:
+            loss_mse = torch.tensor(0.0, device=grid_pred.device)
+
+        # 一致性损失
+        loss_consistency = self.consistency_loss(grid_pred, positive_mask)
+
+        return self.lambda_mse * loss_mse + self.lambda_consistency * loss_consistency
+

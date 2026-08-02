@@ -338,6 +338,42 @@ def interpolate_seq(time_points, values, target_len=SEQ_LEN):
     return result
 
 
+def create_triple_channel_seq(seq_1d, seq_len):
+    """
+    将单通道序列转换为三通道序列（初始温度 + 当前温度 + 温度变化率）
+
+    Args:
+        seq_1d: 单通道序列 (seq_len,)
+        seq_len: 目标序列长度
+
+    Returns:
+        三通道序列 (3, seq_len)
+    """
+    seq = np.array(seq_1d, dtype=np.float32)
+
+    # 通道0: 初始温度（第一个温度值）
+    init_temp = np.full(seq_len, seq[0] if len(seq) > 0 else 0.0, dtype=np.float32)
+
+    # 通道1: 当前温度
+    curr_temp = seq.copy()
+
+    # 通道2: 温度变化率（差分计算）
+    # 使用前向差分，最后一个点使用前一个差分值
+    if len(seq) >= 2:
+        temp_rate = np.diff(seq, prepend=seq[0])
+    else:
+        temp_rate = np.zeros(seq_len, dtype=np.float32)
+
+    # 归一化温度变化率到合理范围（-1, 1）
+    rate_std = np.std(temp_rate) + 1e-6
+    temp_rate = np.clip(temp_rate / (rate_std * 3), -1, 1).astype(np.float32)
+
+    # 堆叠成三通道
+    triple_seq = np.stack([init_temp, curr_temp, temp_rate], axis=0)
+
+    return triple_seq
+
+
 def process_seq(time_points, values, target_len=SEQ_LEN, mode='interpolate'):
     """
     处理序列到目标长度
@@ -596,7 +632,7 @@ class SingleBatchDataset(Dataset):
     def __init__(self, data_root, seq_len=SEQ_LEN, image_size=IMAGE_SIZE,
                  augment=True, sample_indices=None, predict_offset=0,
                  seq_interp_mode='interpolate', remove_contours=False,
-                 task='detection'):
+                 task='detection', triple_channel=False):
         """
         Args:
             data_root: 数据目录根路径
@@ -608,7 +644,9 @@ class SingleBatchDataset(Dataset):
             seq_interp_mode: 序列处理模式，'interpolate' 或 'pool'
             remove_contours: 是否对参数化扫描4启用等值线去除
             task: 任务模式，'detection' / 'segmentation' / 'multitask'
+            triple_channel: 是否启用三通道时序输入（初始温度 + 当前温度 + 温度变化率）
         """
+        self.triple_channel = triple_channel
         self.data_root = data_root
         self.seq_len = seq_len
         self.image_size = image_size
@@ -828,6 +866,11 @@ class SingleBatchDataset(Dataset):
             seq_1d = process_seq(None, seq_1d, self.seq_len, mode='pool')
 
         seq_1d = self.transform_1d(seq_1d)
+
+        # 三通道处理：初始温度 + 当前温度 + 温度变化率
+        if self.triple_channel:
+            seq_1d = create_triple_channel_seq(seq_1d, self.seq_len)
+
         seq_1d = torch.from_numpy(seq_1d).float()
 
         # 2D图像
@@ -1009,7 +1052,8 @@ class MultiBatchCollateDataset(Dataset):
                  seq_len=SEQ_LEN, image_size=IMAGE_SIZE, augment=True,
                  seed=42, predict_offset=0,
                  seq_interp_mode='interpolate', remove_contours=False,
-                 disabled_batches=None, task='detection'):
+                 disabled_batches=None, task='detection',
+                 triple_channel=False):
         """
         Args:
             data_roots: 数据目录列表
@@ -1024,6 +1068,7 @@ class MultiBatchCollateDataset(Dataset):
             remove_contours: 是否启用等值线去除
             disabled_batches: 禁用的批次列表
             task: 任务模式，'detection' / 'segmentation' / 'multitask'
+            triple_channel: 是否启用三通道时序输入
         """
         self.split = split
         self.seq_len = seq_len
@@ -1033,6 +1078,7 @@ class MultiBatchCollateDataset(Dataset):
         self.remove_contours = remove_contours
         self.disabled_batches = disabled_batches or []
         self.task = task
+        self.triple_channel = triple_channel
 
         try:
             from utils.console import print_title, print_info, print_error, print_warning
@@ -1129,7 +1175,8 @@ class MultiBatchCollateDataset(Dataset):
                 predict_offset=self.predict_offset,
                 seq_interp_mode=self.seq_interp_mode,
                 remove_contours=self.remove_contours,
-                task=self.task
+                task=self.task,
+                triple_channel=self.triple_channel
             )
             self.sub_datasets.append(ds)
 
@@ -1164,7 +1211,8 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
                                   seq_interp_mode='interpolate',
                                   remove_contours=False,
                                   disabled_batches=None,
-                                  task='detection'):
+                                  task='detection',
+                                  triple_channel=False):
     """
     创建多批次数据加载器
 
@@ -1181,6 +1229,7 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
         remove_contours: 是否启用等值线去除
         disabled_batches: 禁用的批次列表
         task: 任务模式，'detection' / 'segmentation' / 'multitask'
+        triple_channel: 是否启用三通道时序输入（初始温度 + 当前温度 + 温度变化率）
 
     Returns:
         tuple: (train_loader, test_loader)
@@ -1199,6 +1248,8 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
 
     print_title("创建多批次数据加载器...")
     print_info(f"数据目录: {[os.path.basename(p) for p in data_roots]}")
+    if triple_channel:
+        print_info("启用三通道时序输入: [初始温度, 当前温度, 温度变化率]")
 
     # 创建数据集
     train_dataset = MultiBatchCollateDataset(
@@ -1212,7 +1263,8 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
         seq_interp_mode=seq_interp_mode,
         remove_contours=remove_contours,
         disabled_batches=disabled_batches,
-        task=task
+        task=task,
+        triple_channel=triple_channel
     )
 
     test_dataset = MultiBatchCollateDataset(
@@ -1226,7 +1278,8 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
         seq_interp_mode=seq_interp_mode,
         remove_contours=remove_contours,
         disabled_batches=disabled_batches,
-        task=task
+        task=task,
+        triple_channel=triple_channel
     )
 
     # 创建DataLoader

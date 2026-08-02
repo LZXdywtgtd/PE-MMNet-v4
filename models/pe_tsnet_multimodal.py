@@ -24,6 +24,173 @@ import math
 
 
 # =============================================================================
+# SE/CoordAttention 模块
+# =============================================================================
+
+class SEBlock(nn.Module):
+    """
+    Squeeze-and-Excitation 模块
+    通过通道注意力机制增强特征表示
+
+    原理：
+    - Squeeze: 全局平均池化，将空间信息压缩为通道描述符
+    - Excitation: 两层全连接学习通道依赖关系
+    - Scale: 用学习到的注意力权重重新校准通道
+    """
+
+    def __init__(self, channels, reduction=16):
+        """
+        Args:
+            channels: 输入通道数
+            reduction: 压缩比（默认16，如512→32）
+        """
+        super().__init__()
+        self.squeeze = nn.AdaptiveAvgPool2d(1)
+        self.excitation = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        """
+        Args:
+            x: (B, C, H, W)
+
+        Returns:
+            (B, C, H, W) - 通道注意力加权后的特征
+        """
+        b, c, _, _ = x.size()
+        # Squeeze: (B, C, H, W) → (B, C)
+        y = self.squeeze(x).view(b, c)
+        # Excitation: (B, C) → (B, C) → (B, C, 1, 1)
+        y = self.excitation(y).view(b, c, 1, 1)
+        # Scale: 通道注意力加权
+        return x * y.expand_as(x)
+
+
+class CoordAtt(nn.Module):
+    """
+    Coordinate Attention（坐标注意力）
+
+    通过将通道注意力分解为两个1D特征编码来实现，
+    分别沿水平和垂直方向聚合特征，从而捕获长程依赖和精确位置信息。
+
+    适用于需要位置感知的视觉任务（如裂纹检测）。
+    """
+
+    def __init__(self, inp, oup, reduction=32):
+        """
+        Args:
+            inp: 输入通道数
+            oup: 输出通道数（通常与输入相同）
+            reduction: 中间层通道压缩比
+        """
+        super().__init__()
+        mip = max(8, inp // reduction)
+
+        # 高度方向池化：保留宽度信息
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        # 宽度方向池化：保留高度信息
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+
+        # 共享卷积：降低通道维度
+        self.conv1 = nn.Conv2d(inp, mip, kernel_size=1, stride=1, padding=0)
+        self.bn1 = nn.BatchNorm2d(mip)
+        self.act = nn.ReLU(inplace=True)
+
+        # 分离的方向卷积
+        self.conv_h = nn.Conv2d(mip, oup, kernel_size=1)
+        self.conv_w = nn.Conv2d(mip, oup, kernel_size=1)
+
+    def forward(self, x):
+        """
+        Args:
+            x: (B, C, H, W)
+
+        Returns:
+            (B, C, H, W) - 坐标注意力加权后的特征
+        """
+        identity = x
+        n, c, h, w = x.size()
+
+        # 高度方向编码
+        x_h = self.pool_h(x)  # (B, C, H, 1)
+        # 宽度方向编码
+        x_w = self.pool_w(x).permute(0, 1, 3, 2)  # (B, C, 1, W) → (B, C, W, 1)
+
+        # 拼接并通过共享卷积
+        y = torch.cat([x_h, x_w], dim=2)  # (B, C, H+1, 1)
+        y = self.conv1(y)
+        y = self.bn1(y)
+        y = self.act(y)
+
+        # 分离高度和宽度特征
+        x_h, x_w = torch.split(y, [h, w], dim=2)
+        x_w = x_w.permute(0, 1, 3, 2)
+
+        # 生成注意力权重
+        a_h = self.conv_h(x_h).sigmoid()  # (B, C, H, 1)
+        a_w = self.conv_w(x_w).sigmoid()  # (B, C, 1, W)
+
+        # 坐标注意力加权
+        return identity * a_w * a_h
+
+
+class BackboneWithAttention(nn.Module):
+    """
+    骨干网络包装器，自动添加注意力模块
+
+    用法：
+    ```python
+    backbone = ResNet18Backbone2D(in_channels=2)
+    enhanced_backbone = BackboneWithAttention(backbone, attention_type='se')
+    # 或
+    enhanced_backbone = BackboneWithAttention(backbone, attention_type='coord')
+    ```
+    """
+
+    def __init__(self, backbone, attention_type='se', reduction=16):
+        """
+        Args:
+            backbone: 骨干网络（如 ResNet18Backbone2D）
+            attention_type: 注意力类型，'se' 或 'coord' 或 None
+            reduction: 注意力模块的压缩比
+        """
+        super().__init__()
+        self.backbone = backbone
+
+        # 获取骨干网络的输出通道数
+        out_channels = getattr(backbone, 'feature_dim', 512)
+
+        if attention_type == 'se':
+            self.attention = SEBlock(channels=out_channels, reduction=reduction)
+        elif attention_type == 'coord':
+            self.attention = CoordAtt(inp=out_channels, oup=out_channels, reduction=reduction)
+        else:
+            self.attention = nn.Identity()
+
+        # 保持与原始骨干网络相同的接口
+        self.feature_dim = out_channels
+
+    def forward(self, x):
+        """
+        Args:
+            x: (B, C, H, W)
+
+        Returns:
+            (B, feature_dim) - 注意力增强的特征
+        """
+        feat = self.backbone(x)
+        # 如果骨干返回的是2D特征图，先应用注意力
+        if feat.dim() == 4:
+            feat = self.attention(feat)
+            feat = F.adaptive_avg_pool2d(feat, (1, 1)).view(feat.size(0), -1)
+        return feat
+
+
+# =============================================================================
 # 分支 1：2D 视觉特征提取（ResNet-18 骨干）
 # =============================================================================
 

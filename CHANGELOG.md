@@ -6,6 +6,74 @@
 
 ---
 
+## [v4.5.0] - 2026-08-02
+
+### 新增：导师反馈8项优化建议实现
+
+#### P0 优先级优化
+
+**分阶段训练**
+- 新增 `--staged_train` 参数：先短序列预训练，再长序列微调
+- 新增 `--short_batches` 参数：指定短序列批次列表
+- 新增 `--freeze_2d`/`--freeze_1d` 参数：阶段2冻结策略
+- 新增 `freeze_model_backbone()` 函数
+
+**SE/CoordAttention 注意力模块**
+- `models/pe_tsnet_multimodal.py` 新增：
+  - `SEBlock`: Squeeze-and-Excitation 通道注意力
+  - `CoordAtt`: 坐标注意力（保留位置信息）
+  - `BackboneWithAttention`: 骨干网络包装器
+- 新增 `--use_se`/`--use_coord_attn` 参数
+
+#### P1-P2 优先级优化
+
+**PatchTST 1D 骨干**
+- 新增 `models/pe_tsnet_patchtst.py`：
+  - `PatchTST1D`: 分块Transformer时序编码器
+  - `PatchTSTWithRate`: 增强版（处理初始温度+变化率）
+- 新增变体：`swin_yolo_patchtst`, `vit_yolo_patchtst`
+
+**门控多模态融合**
+- 新增 `models/pe_tsnet_fusion.py`：
+  - `CrossAttentionBranch`: 交叉注意力分支
+  - `GatedMultimodalFusion`: 温度/应力分治门控融合
+- 新增 `--fusion gated` 选项
+
+#### P3-P5 优先级优化
+
+**ThermalCutMix 增强（物理安全版）**
+- 新增 `training/augmentation.py`：
+  - `ThermalCutMix`: 仅混合温度通道，应力通道保持不变
+- 新增 `--aug_cutmix_prob` 参数（默认0，关闭）
+
+**密度一致性损失**
+- `training/mono_loss.py` 新增：
+  - `DensityConsistencyLoss`: 邻域网格密度平滑约束
+  - `CombinedDensityLoss`: 组合密度损失
+
+**三通道时序输入**
+- `data/dataset_multimodal.py` 新增：
+  - `create_triple_channel_seq()`: 生成 [初始温度, 当前温度, 温度变化率]
+- 新增 `--triple_channel` 参数
+
+#### 训练稳定性增强
+
+- 显存自动降级策略
+- 混合精度训练 (FP16) + GradScaler
+- 评估时关闭 FP16 保持精度
+
+#### 团队协作功能
+
+- 新增 `team_train.py`：团队协作训练脚本
+  - 团队成员只需运行 `python team_train.py`
+  - 选择数字即可开始训练，无需了解命令行参数
+  - 预置10种训练任务 + 批量YOLO系列训练
+- 新增 `team_configs.txt`：团队配置文件
+- 新增 `export_team_configs()` 函数：自动导出团队配置
+- `launcher.py` 新增团队协作预设快捷键（`team_base`, `team_yolo`, `team_opt`）
+
+---
+
 ## [v4.4.0] - 2026-08-02
 
 ### 新增：YOLO-FPN 和 DETR 风格变体

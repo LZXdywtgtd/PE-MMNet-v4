@@ -8,17 +8,13 @@
 
 ## 项目简介
 
-本项目实现了一个多模态融合的裂纹检测/分割模型，支持三种任务模式：
+本项目实现了一个多模态融合的裂纹检测/分割模型：
 
-| 任务模式 | 输入 | 输出 | 适用场景 |
-|----------|------|------|----------|
-| **Detection** | 温度时序 + 图像 | 6维向量 [x, y, l, w, conf, density] | 标准检测任务 |
-| **Segmentation** | 温度时序 + 图像 | 256x256 二值掩膜 | 像素级裂纹分割 |
-| **Multitask** | 温度时序 + 图像 | 检测向量 + 分割掩膜 | 同时需要检测和分割 |
-
-**输入模态**：
-- **模态 A（1D）**：300 点高频温度时序（10Hz × 30s）
-- **模态 B（2D）**：256x256 温度场 + 应力场图像
+| 任务模式 | 输入 | 输出 |
+|----------|------|------|
+| **Detection** | 温度时序 + 图像 | [x, y, l, w, conf, density] |
+| **Segmentation** | 温度时序 + 图像 | 256x256 二值掩膜 |
+| **Multitask** | 温度时序 + 图像 | 检测向量 + 分割掩膜 |
 
 ---
 
@@ -32,7 +28,7 @@ pip install -r requirements.txt
 
 ### 2. 配置数据路径
 
-首次运行会自动提示配置数据路径，或手动创建 `config.json`：
+首次运行会自动提示配置，或手动创建 `config.json`：
 
 ```json
 {
@@ -42,89 +38,58 @@ pip install -r requirements.txt
 
 ### 3. 开始训练
 
-**推荐方式：统一启动器**
+**团队协作（推荐新手）**：
+```bash
+python team_train.py
+```
+选择数字即可训练！
 
+**交互式菜单**：
 ```bash
 python train_launcher.py
 ```
 
-菜单选项：
-- `[1]` 快速训练（预设模板）
-- `[2]` 自定义配置（详细参数说明）
-- `[3]` 消融实验
-- `[4]` 队列配置向导（批量训练）
-- `[5]` 添加到现有队列
-
-**快捷批量训练**
-
+**直接训练**：
 ```bash
-python train_launcher.py --quick "resnet18,100,0,detection" "vit_small,100,0,detection"
-```
-
-**直接训练（高级用户）**
-
-```bash
-# 检测模式（默认）
 python run_train.py --mode train --epochs 100
-
-# 分割模式
-python run_train.py --mode train --task segmentation --epochs 100
-
-# 评估模型
-python run_train.py --mode eval --checkpoint ./checkpoints/xxx.pt
 ```
 
 ---
 
-## 核心功能
+## 模型变体
 
-### 显存自适应配置
+| 变体 | 说明 | 适用场景 |
+|------|------|----------|
+| `full` | 完整 MM-DBFNet（默认） | 标准检测 |
+| `swin_yolo_fpn` | Swin-Tiny + YOLO-FPN | 空间定位 |
+| `vit_yolo_fpn` | ViT-Small + YOLO-FPN | 全局注意力 |
+| `detr_style` | ResNet-18 + Transformer | 全局感知 |
+| `swin_yolo_patchtst` | Swin + YOLO + PatchTST | 时序增强 |
 
-自动检测 GPU 显存，选择最佳配置：
-
-| 空闲显存 | 图像尺寸 | 批次大小 | FP16 |
-|----------|----------|----------|------|
-| ≥10 GB | 512 | 16 | ✅ |
-| 6-10 GB | 512 | 8 | ✅ |
-| 4-6 GB | 384 | 8 | ✅ |
-| <4 GB | 256 | 4 | ❌ |
-
-### 模型变体
-
-| 变体 | 说明 | 2D骨干 | 检测方式 |
-|------|------|---------|----------|
-| `full` | 完整 MM-DBFNet（默认） | ResNet-18 | MLP回归 |
-| `1d_only` | 仅时序分支 | - | MLP回归 |
-| `2d_only` | 仅空间分支 | ResNet-18 | MLP回归 |
-| `concat` | 双分支拼接融合 | ResNet-18 | MLP回归 |
-| `add` | 双分支加法融合 | ResNet-18 | MLP回归 |
-| `cross_attn` | Cross-Attention 融合 | ResNet-18 | MLP回归 |
-| `swin_yolo_fpn` | Swin-YOLO-FPN | Swin-Tiny | YOLO网格回归 |
-| `vit_yolo_fpn` | ViT-YOLO-FPN | ViT-Small | YOLO网格回归 |
-| `detr_style` | DETR风格 | ResNet-18 | Transformer |
-
-### 新增变体训练示例
+### 训练示例
 
 ```bash
-# Swin-YOLO-FPN（推荐）
-python run_train.py --mode train --variant swin_yolo_fpn --epochs 100
+# YOLO系列（推荐）
+python run_train.py --variant swin_yolo_fpn --epochs 100 --lr 1e-4
 
-# ViT-YOLO-FPN
-python run_train.py --mode train --variant vit_yolo_fpn --epochs 100
+# 优化组合
+python run_train.py --variant full --fusion gated --use_coord_attn --epochs 100
 
-# DETR风格（需要更小学习率）
-python run_train.py --mode train --variant detr_style --epochs 100 --lr 1e-4
+# 分阶段训练
+python run_train.py --variant full --staged_train --epochs 100
 ```
 
-### 时间偏移预测
+---
 
-支持预测未来时刻的裂纹状态：
+## 高级功能
 
-```bash
-python run_train.py --predict_offset 0  # 当前时刻（默认）
-python run_train.py --predict_offset 1  # 0.05秒后
-python run_train.py --predict_offset 2  # 0.1秒后
-```
+| 功能 | 参数 | 说明 |
+|------|------|------|
+| 分阶段训练 | `--staged_train` | 先预训练后微调 |
+| 坐标注意力 | `--use_coord_attn` | 保留位置信息 |
+| 门控融合 | `--fusion gated` | 温度/应力分治 |
+| 三通道输入 | `--triple_channel` | 初始+当前温度+变化率 |
+| ThermalCutMix | `--aug_cutmix_prob 0.5` | 物理安全增强 |
 
 ---
 
@@ -132,92 +97,42 @@ python run_train.py --predict_offset 2  # 0.1秒后
 
 ```
 project_v4/
-├── run_train.py              # 统一训练入口
-├── train_launcher.py         # 统一启动器（推荐）
-├── launcher.py               # 交互式配置
-├── config.json               # 数据路径配置
-├── requirements.txt          # 依赖
+├── run_train.py           # 统一训练入口
+├── train_launcher.py      # 交互式启动器
+├── team_train.py          # 团队协作脚本
+├── config.json            # 数据路径配置
 │
-├── data/                     # 数据加载
+├── data/                  # 数据加载
 │   └── dataset_multimodal.py
 │
-├── models/                   # 模型定义
-│   ├── pe_tsnet_multimodal.py  # 原有模型
-│   ├── pe_tsnet_yolo.py         # YOLO-FPN变体
-│   └── pe_tsnet_detr.py         # DETR风格变体
+├── models/                # 模型定义
+│   ├── pe_tsnet_multimodal.py  # 基础模型
+│   ├── pe_tsnet_yolo.py        # YOLO-FPN变体
+│   ├── pe_tsnet_detr.py        # DETR风格变体
+│   ├── pe_tsnet_patchtst.py    # PatchTST骨干
+│   └── pe_tsnet_fusion.py      # 门控融合
 │
-├── training/                 # 损失函数
-│   └── mono_loss.py             # 包含YOLO/DETR损失
+├── training/              # 训练相关
+│   ├── mono_loss.py       # 损失函数
+│   └── augmentation.py    # 数据增强
 │
-├── tools/                    # 工具
-│   ├── batch_train_gui.py    # 批量训练工具
-│   ├── streamlit_app.py      # 可视化工具
-│   └── visualization.py
-│
-├── utils/                    # 工具函数
-│   ├── config.py
-│   └── console.py
-│
-├── docs/                     # 文档
-│   ├── 快速配置指南.md
-│   ├── 架构设计文档.md
-│   ├── 调参与算法工程指导文档.md
-│   └── 项目算法与训练实验设计报告.md
-│
-├── checkpoints/              # 模型检查点
-└── benchmark_results/        # 实验结果
-```
-
----
-
-## 常用命令参考
-
-### 训练命令
-
-```bash
-# 基本训练
-python run_train.py --mode train --epochs 150
-
-# 指定架构
-python run_train.py --mode train --backbone_2d vit_small --backbone_1d transformer
-
-# 高分辨率
-python run_train.py --mode train --image_size 768
-
-# 禁用 FP16
-python run_train.py --mode train --no_fp16
-
-# 强制重新训练
-python run_train.py --mode train --force_retrain
-```
-
-### 评估命令
-
-```bash
-# 评估检查点
-python run_train.py --mode eval --checkpoint ./checkpoints/xxx.pt
-
-# 指定图像尺寸
-python run_train.py --mode eval --checkpoint ./checkpoints/xxx.pt --image_size 512
-```
-
-### 消融实验
-
-```bash
-python run_train.py --mode ablation --epochs 50
+└── docs/                 # 文档
+    ├── 快速配置指南.md
+    ├── 架构设计文档.md
+    ├── 调参与算法工程指导文档.md
+    └── 项目算法与训练实验设计报告.md
 ```
 
 ---
 
 ## 评估指标
 
-| 任务 | 指标 | 说明 |
+| 指标 | 说明 | 目标 |
 |------|------|------|
-| Detection | R² | 决定系数，越接近1越好 |
-| Detection | RMSE | 均方根误差，越小越好 |
-| Detection | mIoU | 平均 IoU，定位精度 |
-| Detection | 违反率 | 单调性违反百分比，越小越好 |
-| Segmentation | Dice | Dice 系数，越接近1越好 |
+| R² | 决定系数 | 越接近1越好 |
+| RMSE | 均方根误差 | 越小越好 |
+| mIoU | 定位精度 | 越大越好 |
+| 违反率 | 单调性违反 | 越小越好 |
 
 ---
 
@@ -226,12 +141,17 @@ python run_train.py --mode ablation --epochs 50
 | 文档 | 内容 |
 |------|------|
 | [快速配置指南](docs/快速配置指南.md) | 环境配置、首次使用 |
-| [架构设计文档](docs/架构设计文档.md) | 代码架构、调用关系 |
-| [调参指南](docs/调参与算法工程指导文档.md) | 损失函数权重、调参建议 |
-| [算法报告](docs/项目算法与训练实验设计报告.md) | 算法原理、实验设计 |
+| [架构设计文档](docs/架构设计文档.md) | 模块关系、数据流 |
+| [调参指南](docs/调参与算法工程指导文档.md) | 损失权重、调参建议 |
+| [算法报告](docs/项目算法与训练实验设计报告.md) | 算法原理 |
+| [开发人员文档](开发人员文档.md) | 代码规范、模块详解 |
+| [API文档](api.md) | 接口参考 |
+| [CHANGELOG](CHANGELOG.md) | 更新日志 |
 
 ---
 
-## 更新日志
+## 版本信息
 
-详见 [CHANGELOG.md](CHANGELOG.md)
+当前版本：v4.5.0 (2026-08-02)
+
+主要更新：导师反馈8项优化建议 + 团队协作功能

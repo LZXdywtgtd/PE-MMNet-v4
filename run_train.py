@@ -348,7 +348,8 @@ def evaluate_model(model, device, data_roots=None, predict_offset=0,
         seq_interp_mode=seq_interp_mode,
         remove_contours=remove_contours,
         disabled_batches=disabled_batches or [],
-        task=task
+        task=task,
+        triple_channel=config.get('triple_channel', False)
     )
 
     model = model.to(device)
@@ -527,6 +528,155 @@ def eval_checkpoint(checkpoint_path, device, image_size=None):
 # =============================================================================
 # 训练函数
 # =============================================================================
+
+def freeze_model_backbone(model, freeze_2d=True, freeze_1d=False, freeze_names=None):
+    """冻结模型骨干网络
+
+    Args:
+        model: 模型实例
+        freeze_2d: 是否冻结2D骨干
+        freeze_1d: 是否冻结1D骨干
+        freeze_names: 其他需要冻结的参数名列表
+    """
+    frozen_count = 0
+    trainable_count = 0
+
+    # 定义需要冻结的参数名前缀（兼容多种模型命名）
+    # PETSNetMultimodal: branch_2d, branch_1d
+    # SwinYOLOFPN/ViTYOLOFPN/DETRStyle: backbone_2d, backbone_1d
+    def is_2d_backbone(name):
+        return 'branch_2d' in name or 'backbone_2d' in name
+
+    def is_1d_backbone(name):
+        return 'branch_1d' in name or 'backbone_1d' in name
+
+    for name, param in model.named_parameters():
+        should_freeze = False
+        if freeze_2d and is_2d_backbone(name):
+            should_freeze = True
+        if freeze_1d and is_1d_backbone(name):
+            should_freeze = True
+        if freeze_names and any(fn in name for fn in freeze_names):
+            should_freeze = True
+        # 默认冻结骨干，保留检测头和融合层可训练
+        if 'output_head' not in name and 'fusion' not in name and 'head' not in name:
+            if freeze_2d and is_2d_backbone(name):
+                param.requires_grad = False
+                frozen_count += 1
+            elif freeze_1d and is_1d_backbone(name):
+                param.requires_grad = False
+                frozen_count += 1
+            elif freeze_names and any(fn in name for fn in freeze_names):
+                param.requires_grad = False
+                frozen_count += 1
+            else:
+                trainable_count += 1
+        else:
+            trainable_count += 1
+    print_info(f"冻结策略: {frozen_count} 个参数冻结, {trainable_count} 个参数可训练")
+    return model
+
+
+def staged_training(variant_key, config, device, data_roots=None):
+    """分阶段训练：先短序列预训练，再长序列微调
+
+    Args:
+        variant_key: 模型变体标识
+        config: 配置字典
+        device: 设备
+        data_roots: 数据根目录列表
+
+    Returns:
+        model: 训练好的模型
+    """
+    from data.dataset_multimodal import create_multibatch_dataloaders
+
+    if data_roots is None:
+        data_roots = get_data_batches()
+
+    # 获取短序列批次列表（从配置或默认）
+    short_batches = config.get('short_batches', ['单次扫描'])
+    phase1_roots = [r for r in data_roots if any(b in os.path.basename(r) for b in short_batches)]
+
+    if not phase1_roots:
+        print_warning("未找到短序列批次，将使用全部数据训练")
+        phase1_roots = data_roots
+
+    print_title("阶段1: 短序列预训练")
+    print_info(f"使用批次: {[os.path.basename(r) for r in phase1_roots]}")
+
+    # 阶段1配置
+    phase1_config = config.copy()
+    phase1_config['epochs'] = min(50, config['epochs'])  # 阶段1最多50个epoch
+    phase1_config['patience'] = min(10, config['patience'])
+    phase1_checkpoint = None  # 阶段1不保存单独检查点
+
+    # 创建阶段1数据加载器
+    train_loader_1, test_loader_1 = create_multibatch_dataloaders(
+        data_roots=phase1_roots,
+        batch_size=config['batch_size'],
+        image_size=config['image_size'],
+        predict_offset=config.get('predict_offset', 0),
+        seq_len=config.get('feature_len', 300),
+        seq_interp_mode=config.get('seq_interp_mode', 'interpolate'),
+        remove_contours=config.get('remove_contours', False),
+        disabled_batches=config.get('disabled_batches', []),
+        task=config.get('task', 'detection'),
+        triple_channel=config.get('triple_channel', False)
+    )
+
+    # 创建模型
+    ModelClass = VARIANT_MODELS.get(variant_key, PETSNetMultimodal)
+    model = ModelClass(
+        seq_len=config.get('feature_len', 300),
+        image_channels=2,
+        image_size=config['image_size'],
+        pretrained_2d=True,
+        dropout=config['dropout'],
+        task=config.get('task', 'detection')
+    ) if variant_key == 'full' else ModelClass(dropout=config['dropout'])
+    model = model.to(device)
+
+    # 阶段1训练
+    model, _ = train_model(model, train_loader_1, test_loader_1, phase1_config, device)
+
+    # 阶段2: 长序列微调
+    print_title("阶段2: 长序列微调")
+    print_info(f"使用批次: {[os.path.basename(r) for r in data_roots]}")
+
+    # 冻结骨干网络
+    if config.get('freeze_backbone', True):
+        freeze_2d = config.get('freeze_2d', True)
+        freeze_1d = config.get('freeze_1d', False)
+        print_info(f"冻结策略: freeze_2d={freeze_2d}, freeze_1d={freeze_1d}")
+        model = freeze_model_backbone(model, freeze_2d=freeze_2d, freeze_1d=freeze_1d)
+
+    # 创建阶段2数据加载器（全部数据）
+    train_loader_2, test_loader_2 = create_multibatch_dataloaders(
+        data_roots=data_roots,
+        batch_size=config['batch_size'],
+        image_size=config['image_size'],
+        predict_offset=config.get('predict_offset', 0),
+        seq_len=config.get('feature_len', 300),
+        seq_interp_mode=config.get('seq_interp_mode', 'interpolate'),
+        remove_contours=config.get('remove_contours', False),
+        disabled_batches=config.get('disabled_batches', []),
+        task=config.get('task', 'detection'),
+        triple_channel=config.get('triple_channel', False)
+    )
+
+    # 阶段2配置（使用剩余的epoch）
+    phase2_epochs = config['epochs'] - phase1_config['epochs']
+    if phase2_epochs > 0:
+        phase2_config = config.copy()
+        phase2_config['epochs'] = phase2_epochs
+        phase2_config['patience'] = config['patience']
+        model, _ = train_model(model, train_loader_2, test_loader_2, phase2_config, device)
+    else:
+        print_info("阶段1已完成全部训练，跳过阶段2")
+
+    return model
+
 
 def train_model(model, train_loader, test_loader, config, device, checkpoint_path=None):
     """训练模型"""
@@ -920,7 +1070,8 @@ def train_variant(variant_key, config, device, data_roots=None):
         seq_interp_mode=config.get('seq_interp_mode', 'interpolate'),
         remove_contours=config.get('remove_contours', False),
         disabled_batches=config.get('disabled_batches', []),
-        task=task
+        task=task,
+        triple_channel=config.get('triple_channel', False)
     )
 
     # 验证数据集非空
@@ -1025,6 +1176,22 @@ def main():
     parser.add_argument('--force_retrain', action='store_true',
                         help='强制重新训练，即使检查点已存在')
 
+    # 分阶段训练
+    parser.add_argument('--staged_train', action='store_true', default=False,
+                        help='启用分阶段训练：先短序列预训练，再长序列微调')
+    parser.add_argument('--short_batches', nargs='+', default=None,
+                        help='短序列批次列表，用于阶段1训练（默认使用单次扫描）')
+    parser.add_argument('--freeze_backbone', action='store_true', default=True,
+                        help='阶段2是否冻结骨干网络（默认True）')
+    parser.add_argument('--freeze_2d', action='store_true', default=True,
+                        help='阶段2是否冻结2D骨干（默认True）')
+    parser.add_argument('--freeze_1d', action='store_true', default=False,
+                        help='阶段2是否冻结1D骨干（默认False）')
+
+    # 三通道时序输入
+    parser.add_argument('--triple_channel', action='store_true', default=False,
+                        help='启用三通道时序输入：初始温度 + 当前温度 + 温度变化率')
+
     # 评估
     parser.add_argument('--eval_output', type=str, default=None, help='评估结果保存路径')
 
@@ -1079,6 +1246,7 @@ def main():
         'remove_contours': args.remove_contours,
         'disabled_batches': args.disable_batch,
         'task': args.task,
+        'triple_channel': args.triple_channel,
         # 检查点控制
         'force_retrain': args.force_retrain,
         'resume': args.resume,
@@ -1181,7 +1349,18 @@ def main():
         print_section(f"开始训练: {VARIANT_DISPLAY_NAMES.get(args.variant, args.variant)}")
         print_info(f"任务模式: {args.task}")
 
-        model = train_variant(args.variant, config, device, data_roots)
+        # 分阶段训练模式
+        if args.staged_train:
+            print_info("启用分阶段训练模式")
+            # 更新配置中的分阶段参数
+            config['staged_train'] = True
+            config['short_batches'] = args.short_batches or ['单次扫描']
+            config['freeze_backbone'] = args.freeze_backbone
+            config['freeze_2d'] = args.freeze_2d
+            config['freeze_1d'] = args.freeze_1d
+            model = staged_training(args.variant, config, device, data_roots)
+        else:
+            model = train_variant(args.variant, config, device, data_roots)
 
         if model is not None:
             # 训练完成后自动评估

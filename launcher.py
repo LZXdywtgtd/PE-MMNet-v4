@@ -82,12 +82,57 @@ MULTITASK_PRESETS = {
 
 # 消融实验：使用 --variant（已在 run_train.py 完整实现）
 ABLATION_PRESETS = {
+    # 基础变体
     "a1": {"name": "仅2D分支 (ResNet18)", "args": "--variant 2d_only"},
     "a2": {"name": "仅1D分支 (CNN-Attn)", "args": "--variant 1d_only"},
     "a3": {"name": "双分支拼接", "args": "--variant concat"},
     "a4": {"name": "双分支加法", "args": "--variant add"},
     "a5": {"name": "Cross-Attention", "args": "--variant cross_attn"},
     "a6": {"name": "完整模型 (full)", "args": "--variant full"},
+
+    # YOLO-FPN 变体
+    "b1": {"name": "Swin-YOLO-FPN", "args": "--variant swin_yolo_fpn --lr 1e-4"},
+    "b2": {"name": "ViT-YOLO-FPN", "args": "--variant vit_yolo_fpn --lr 1e-4"},
+    "b3": {"name": "DETR风格", "args": "--variant detr_style --lr 1e-4"},
+
+    # PatchTST 变体
+    "c1": {"name": "Swin-YOLO-PatchTST", "args": "--variant swin_yolo_patchtst --lr 1e-4"},
+    "c2": {"name": "ViT-YOLO-PatchTST", "args": "--variant vit_yolo_patchtst --lr 1e-4"},
+
+    # 高级优化组合
+    "d1": {"name": "full + 门控融合", "args": "--variant full --fusion gated"},
+    "d2": {"name": "full + 坐标注意力", "args": "--variant full --use_coord_attn"},
+    "d3": {"name": "full + 三通道输入", "args": "--variant full --triple_channel"},
+    "d4": {"name": "分阶段训练", "args": "--variant full --staged_train"},
+
+    # 团队协作快捷预设
+    "team_base": {"name": "【团队】基线模型", "args": "--variant full --epochs 100"},
+    "team_yolo": {"name": "【团队】YOLO系列", "args": "--variant swin_yolo_fpn --epochs 100 --lr 1e-4"},
+    "team_opt": {"name": "【团队】优化组合", "args": "--variant full --fusion gated --use_coord_attn --epochs 100"},
+}
+
+# 团队协作配置模板
+TEAM_TEMPLATES = {
+    "quick_baseline": {
+        "name": "快速基线",
+        "args": "--variant full --epochs 50 --batch_size 8",
+        "time_estimate": "~30分钟"
+    },
+    "quick_yolo": {
+        "name": "快速YOLO",
+        "args": "--variant swin_yolo_fpn --epochs 50 --lr 1e-4 --batch_size 4",
+        "time_estimate": "~40分钟"
+    },
+    "full_train": {
+        "name": "完整训练",
+        "args": "--variant full --epochs 200 --batch_size 16",
+        "time_estimate": "~2小时"
+    },
+    "ablation_small": {
+        "name": "消融实验(小)",
+        "args": "--variant full --epochs 30 --batch_size 8",
+        "time_estimate": "~15分钟"
+    },
 }
 
 
@@ -120,6 +165,65 @@ def validate_args(args_list):
     has_backbone = any('--backbone' in arg for arg in args_list)
     if has_variant and has_backbone:
         raise ValueError("消融实验 (--variant) 与架构配置 (--backbone_*) 互斥")
+
+
+def export_team_configs(filepath='team_configs.txt'):
+    """导出团队协作配置文件
+
+    生成一个简单的配置文件，团队成员可以直接复制使用。
+
+    Args:
+        filepath: 输出文件路径
+    """
+    lines = [
+        "=" * 60,
+        "PE-MMNet v4 团队协作配置",
+        "=" * 60,
+        "",
+        "# 使用方法：将下面的命令复制到命令行执行",
+        "# 或使用: python run_train.py --mode train <粘贴参数>",
+        "",
+        "# 快速基线训练 (~30分钟)",
+        "# 适用场景：快速验证代码能跑通",
+        "python run_train.py --mode train --variant full --epochs 50 --batch_size 8",
+        "",
+        "# YOLO系列训练 (~40分钟/模型)",
+        "# 适用场景：需要更好的空间定位能力",
+        "python run_train.py --mode train --variant swin_yolo_fpn --epochs 100 --lr 1e-4",
+        "python run_train.py --mode train --variant vit_yolo_fpn --epochs 100 --lr 1e-4",
+        "python run_train.py --mode train --variant detr_style --epochs 100 --lr 1e-4",
+        "",
+        "# PatchTST系列训练 (~40分钟/模型)",
+        "# 适用场景：需要更好的时序建模能力",
+        "python run_train.py --mode train --variant swin_yolo_patchtst --epochs 100 --lr 1e-4",
+        "",
+        "# 优化组合训练 (~1小时)",
+        "# 适用场景：追求最佳性能",
+        "python run_train.py --mode train --variant full --fusion gated --use_coord_attn --epochs 100",
+        "",
+        "# 分阶段训练 (~1.5小时)",
+        "# 适用场景：长序列数据训练",
+        "python run_train.py --mode train --variant full --staged_train --epochs 100",
+        "",
+        "# 三通道输入训练 (~1小时)",
+        "# 适用场景：需要温度变化率信息",
+        "python run_train.py --mode train --variant full --triple_channel --epochs 100",
+        "",
+        "# 完整训练 (~2小时)",
+        "# 适用场景：最终交付模型",
+        "python run_train.py --mode train --variant full --epochs 200 --batch_size 16",
+        "",
+        "# 消融实验快捷键（运行train_launcher.py后选择）",
+        "# a6: 基线 | b1-b3: YOLO系列 | c1-c2: PatchTST系列 | d1-d4: 优化组合",
+        "",
+        "=" * 60,
+    ]
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+
+    print(f"团队配置已导出到: {filepath}")
+    print("团队成员可以直接复制使用!")
 
 
 def build_command(args_list, is_ablation=False):
@@ -490,16 +594,45 @@ def run_ablation_menu():
     print("\n" + "=" * 60)
     print("  消融实验预设")
     print("=" * 60 + "\n")
-    for key, preset in ABLATION_PRESETS.items():
-        print(f"  [{key}] {preset['name']}")
-    print("\n  [all] 运行全部  [q] 返回")
+
+    # 分组显示
+    print("【基础变体】")
+    for key in ['a1', 'a2', 'a3', 'a4', 'a5', 'a6']:
+        preset = ABLATION_PRESETS.get(key, {})
+        print(f"  [{key}] {preset.get('name', '')}")
+
+    print("\n【YOLO-FPN变体】")
+    for key in ['b1', 'b2', 'b3']:
+        preset = ABLATION_PRESETS.get(key, {})
+        print(f"  [{key}] {preset.get('name', '')}")
+
+    print("\n【PatchTST变体】")
+    for key in ['c1', 'c2']:
+        preset = ABLATION_PRESETS.get(key, {})
+        print(f"  [{key}] {preset.get('name', '')}")
+
+    print("\n【高级优化】")
+    for key in ['d1', 'd2', 'd3', 'd4']:
+        preset = ABLATION_PRESETS.get(key, {})
+        print(f"  [{key}] {preset.get('name', '')}")
+
+    print("\n【团队协作】")
+    for key in ['team_base', 'team_yolo', 'team_opt']:
+        preset = ABLATION_PRESETS.get(key, {})
+        print(f"  [{key}] {preset.get('name', '')}")
+
+    print("\n  [export] 导出团队配置文件  [all] 运行全部  [q] 返回")
 
     choice = input("选择: ").strip().lower()
     if choice == 'q':
         return
+    if choice == 'export':
+        export_team_configs()
+        input("\n按回车继续...")
+        return run_ablation_menu()
     if choice == 'all':
         for key, preset in ABLATION_PRESETS.items():
-            if key != 'all':
+            if key != 'all' and not key.startswith('team_'):
                 cmd = build_command(preset['args'].split(), is_ablation=True)
                 print(f"\n执行: {preset['name']}")
                 os.system(cmd)
