@@ -34,6 +34,44 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datetime import datetime
+from wcwidth import wcswidth
+import re
+
+# 盒子固定宽度
+BOX_WIDTH = 100
+
+# ANSI 颜色代码正则
+ANSI_PATTERN = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def display_width(text):
+    """返回文本在终端中的实际显示宽度（忽略ANSI代码）"""
+    # 去除ANSI颜色代码
+    clean = ANSI_PATTERN.sub('', text)
+    width = wcswidth(clean)
+    if width < 0:
+        width = len(clean)
+    return width
+
+
+def pad_to_width(text, target_width):
+    """在右侧补空格，使总显示宽度等于 target_width"""
+    cur = display_width(text)
+    if cur < target_width:
+        return text + ' ' * (target_width - cur)
+    return text
+
+
+def print_box_line(content, width=BOX_WIDTH):
+    """打印盒子的单行，自动左右加空格并补齐宽度"""
+    inner = ' ' + content + ' '
+    padded = pad_to_width(inner, width - 2)  # 减去左右边框
+    return '║' + padded + '║'
+
+
+def print_box_divider(width=BOX_WIDTH):
+    """打印盒子分隔线"""
+    return '╠' + '═' * (width - 2) + '╣'
 
 # 添加项目路径
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -330,7 +368,8 @@ VARIANT_DISPLAY_NAMES = {
 def evaluate_model(model, device, data_roots=None, predict_offset=0,
                   seq_len=300, seq_interp_mode='interpolate',
                   remove_contours=False, disabled_batches=None,
-                  task='detection', image_size=256, variant_key=None):
+                  task='detection', image_size=256, variant_key=None,
+                  triple_channel=False):
     """评估模型性能
 
     Args:
@@ -349,7 +388,7 @@ def evaluate_model(model, device, data_roots=None, predict_offset=0,
         remove_contours=remove_contours,
         disabled_batches=disabled_batches or [],
         task=task,
-        triple_channel=config.get('triple_channel', False)
+        triple_channel=triple_channel
     )
 
     model = model.to(device)
@@ -731,6 +770,13 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
     best_loss = float('inf')
     patience_counter = 0
     start_time = time.time()
+    best_epoch = 0  # 最佳Epoch追溯
+
+    # 上一轮指标（用于颜色对比）
+    prev_metrics = {'r2': 0.0, 'rmse': float('inf'), 'mae': float('inf'), 'violations': float('inf')}
+
+    # 记录第一轮的基准值（用于趋势计算）
+    first_epoch_metrics = None
 
     # ============================================================
     # 干跑验证（提前触发 OOM，避免训练中途崩溃）
@@ -886,6 +932,8 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
         # 验证
         model.eval()
         val_loss = 0.0
+        all_preds = []
+        all_targets = []
         with torch.no_grad():
             for (seq_1d, img_2d), labels in test_loader:
                 # 修复：多任务标签可能是元组，需要解包后再移动到设备
@@ -902,9 +950,14 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                     if variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn']:
                         assigned_target, pos_mask = assigner(labels)
                         loss_total = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                        # 收集预测用于指标计算（取global_density）
+                        all_preds.append(global_density.cpu())
+                        all_targets.append(labels[:, 5:6].cpu())
                     else:  # detr_style
                         indices = matcher(outputs, {'labels': labels})
                         loss_total = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                        all_preds.append(global_density.cpu())
+                        all_targets.append(labels[:, 5:6].cpu())
                 else:
                     outputs = model(seq_1d, img_2d)
                     # 根据任务类型计算损失
@@ -915,15 +968,78 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                     else:
                         # detection: outputs (batch, 6), labels (batch, 6)
                         loss_total, _ = criterion(outputs, labels)
+                        # 收集预测用于指标计算
+                        all_preds.append(outputs[:, 5:6].cpu())
+                        all_targets.append(labels[:, 5:6].cpu())
 
                 val_loss += loss_total.item()
 
         val_loss /= len(test_loader)
         scheduler.step()
 
+        # 计算评估指标
+        if task == 'detection' and all_preds:
+            import numpy as np
+            from scipy import stats
+            preds = torch.cat(all_preds).numpy().flatten()
+            targets = torch.cat(all_targets).numpy().flatten()
+            r2 = stats.pearsonr(preds, targets)[0] ** 2 if len(preds) > 1 else 0.0
+            rmse = np.sqrt(np.mean((preds - targets) ** 2))
+            mae = np.mean(np.abs(preds - targets))
+            # 计算违反率
+            diffs = np.diff(targets)
+            violations = np.sum(diffs > 0) / max(len(diffs), 1)
+
+            # 颜色标记：↑变好(绿) ↓变差(红) -持平(灰)
+            GREEN = "\033[92m"
+            RED = "\033[91m"
+            GRAY = "\033[90m"
+            RESET = "\033[0m"
+
+            def _color_val(val, prev, lower_is_better=False, fmt=".4f"):
+                """根据变化返回带颜色的箭头和值"""
+                if prev == 0.0 or prev == float('inf'):
+                    return f"{GRAY}{val:{fmt}}{RESET}"
+                if lower_is_better:
+                    if val < prev - 0.0001:
+                        return f"{GREEN}↓{val:{fmt}}{RESET}"
+                    elif val > prev + 0.0001:
+                        return f"{RED}↑{val:{fmt}}{RESET}"
+                    else:
+                        return f"{GRAY}-{val:{fmt}}{RESET}"
+                else:
+                    if val > prev + 0.0001:
+                        return f"{GREEN}↑{val:{fmt}}{RESET}"
+                    elif val < prev - 0.0001:
+                        return f"{RED}↓{val:{fmt}}{RESET}"
+                    else:
+                        return f"{GRAY}-{val:{fmt}}{RESET}"
+
+            r2_str = _color_val(r2, prev_metrics['r2'], lower_is_better=False)
+            rmse_str = _color_val(rmse, prev_metrics['rmse'], lower_is_better=True)
+            mae_str = _color_val(mae, prev_metrics['mae'], lower_is_better=True)
+            vio_str = _color_val(violations*100, prev_metrics['violations']*100, lower_is_better=True, fmt=".1f")
+
+            # 分两行显示：R2, RMSE | MAE, 违反率
+            metrics_line1 = f"  R2: {r2_str} | RMSE: {rmse_str}"
+            metrics_line2 = f"  MAE: {mae_str} | 违反率: {vio_str}%"
+
+            # 更新上一轮指标
+            prev_metrics = {'r2': r2, 'rmse': rmse, 'mae': mae, 'violations': violations}
+
+            # 记录第一轮的基准值（用于趋势计算）
+            if first_epoch_metrics is None:
+                first_epoch_metrics = {'r2': r2, 'rmse': rmse, 'mae': mae, 'violations': violations,
+                                      'loss': val_loss, 'time': epoch_elapsed}
+        else:
+            metrics_line1 = ""
+            metrics_line2 = ""
+
+
         # 保存最佳模型
         if val_loss < best_loss - config['min_delta']:
             best_loss = val_loss
+            best_epoch = epoch + 1  # 记录最佳Epoch
             patience_counter = 0
             if checkpoint_path:
                 # 保存模型权重和元数据（task、config）
@@ -935,10 +1051,117 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
         else:
             patience_counter += 1
 
-        # 普通日志输出（无分隔线）
-        if (epoch + 1) % 10 == 0 or epoch == 0:
-            elapsed = time.time() - start_time
-            print_info(f"Epoch {epoch+1}/{config['epochs']} | Train: {train_loss:.4f} | Val: {val_loss:.4f} | Best: {best_loss:.4f} | Time: {elapsed:.1f}s")
+        # 获取当前学习率
+        current_lr = optimizer.param_groups[0]['lr']
+
+        # 获取GPU显存使用（如果有GPU）
+        gpu_mem_str = ""
+        if torch.cuda.is_available():
+            gpu_mem_allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
+            gpu_mem_str = f"GPU: {gpu_mem_allocated:.1f}GB"
+
+        epoch_elapsed = time.time() - start_time
+
+        # 普通输出：两行对齐
+        # 第一行：Epoch + 训练信息
+        epoch_prefix = f"Epoch {epoch+1}/{config['epochs']} | "
+        line1 = (f"{epoch_prefix}"
+                 f"Loss: {train_loss:.4f} (Best: {best_loss:.4f}) | "
+                 f"LR: {current_lr:.2e} | Time: {epoch_elapsed:.1f}s | {gpu_mem_str}")
+
+        # 第二行：验证指标（缩进与 "Epoch x/x | " 对齐）
+        if metrics_line1 and metrics_line2:
+            indent = " " * len(epoch_prefix)
+            line2 = indent + metrics_line1[2:]  # 去掉 metrics_line1 前缀的 "  "
+        else:
+            line2 = ""
+
+        print_info(line1)
+        if line2:
+            print_info(line2)
+
+        # 每10轮输出盒子汇总（升级版）
+        if (epoch + 1) % 10 == 0:
+            # 计算趋势（与第一轮相比）
+            if first_epoch_metrics:
+                loss_delta = val_loss - first_epoch_metrics['loss']
+                r2_delta = r2 - first_epoch_metrics['r2']
+                rmse_delta = rmse - first_epoch_metrics['rmse']
+                mae_delta = mae - first_epoch_metrics['mae']
+                vio_delta = (violations - first_epoch_metrics['violations']) * 100
+            else:
+                loss_delta = r2_delta = rmse_delta = mae_delta = vio_delta = 0.0
+
+            # 进度条
+            progress = (epoch + 1) / config['epochs']
+            progress_pct = f"{progress * 100:.0f}%"
+            progress_bar = '█' * int(progress * 20) + '░' * (20 - int(progress * 20))
+
+            # 预估剩余时间
+            total_elapsed = time.time() - start_time
+            if progress > 0:
+                eta_seconds = (total_elapsed / progress) * (1 - progress)
+                eta_epochs = int(eta_seconds / avg_time) if avg_time > 0 else 0
+                if eta_seconds >= 60:
+                    eta_str = f"{int(eta_seconds // 60)}m{int(eta_seconds % 60)}s"
+                else:
+                    eta_str = f"{eta_seconds:.0f}s"
+            else:
+                eta_str = "N/A"
+                eta_epochs = 0
+
+            # 平均每轮耗时
+            avg_time = total_elapsed / (epoch + 1)
+
+            # 边框
+            content_width = BOX_WIDTH - 2
+            top_border = "╔" + "═" * content_width + "╗"
+            bot_border = "╚" + "═" * content_width + "╝"
+
+            # Epoch标题行
+            epoch_title = f"Epoch {epoch+1}/{config['epochs']} | Best: {best_epoch} | Progress: [{progress_bar}] {progress_pct}"
+
+            # 箭头
+            loss_arrow = "↓" if loss_delta < 0 else ("↑" if loss_delta > 0 else "-")
+            r2_arrow = "↑" if r2_delta > 0 else ("↓" if r2_delta < 0 else "-")
+            rmse_arrow = "↓" if rmse_delta < 0 else ("↑" if rmse_delta > 0 else "-")
+            mae_arrow = "↓" if mae_delta < 0 else ("↑" if mae_delta > 0 else "-")
+            vio_arrow = "↓" if vio_delta < 0 else ("↑" if vio_delta > 0 else "-")
+
+            # GPU显存
+            gpu_part = gpu_mem_str.split()[-1] if gpu_mem_str else "N/A"
+
+            # 生成盒子
+            print_info(top_border)
+            print_info(print_box_line(epoch_title))
+            print_info(print_box_divider())
+
+            # Train行
+            print_info(print_box_line(f"Train | Loss: {train_loss:.4f}/{val_loss:.4f} (Best: {best_loss:.4f}) | Δ {loss_arrow}{loss_delta:+.4f}"))
+            print_info(print_box_line(f"       | LR: {current_lr:.2e} | Time: {epoch_elapsed:.1f}s | Patience: {patience_counter}/{config['patience']}"))
+            print_info(print_box_divider())
+
+            # Valid行
+            print_info(print_box_line(f"Valid | R2: {r2_arrow}{r2:.4f} ({r2_delta:+.4f}) | RMSE: {rmse_arrow}{rmse:.4f} ({rmse_delta:+.4f})"))
+            print_info(print_box_line(f"       | MAE: {mae_arrow}{mae:.4f} ({mae_delta:+.4f}) | 违反率: {vio_arrow}{violations*100:.1f}% ({vio_delta:+.1f}%)"))
+            print_info(print_box_divider())
+
+            # System行
+            print_info(print_box_line(f"System| 本轮: {epoch_elapsed:.1f}s | 累计: {total_elapsed:.1f}s | 平均: {avg_time:.1f}s/epoch"))
+            print_info(print_box_line(f"       | ETA: {eta_str} (~{eta_epochs}轮) | GPU: {gpu_part} | 总进度: {progress_pct}"))
+
+            print_info(bot_border)
+
+            bot_border = "╚" + "═" * content_width + "╝"
+
+            print_info(top_border)
+            print_info(line_title)
+            print_info(sep)
+            print_info(train_line)
+            print_info(metric_line)
+            print_info(sep)
+            print_info(system_line)
+            print_info(bot_border)
 
         if patience_counter >= config['patience']:
             print_warning(f"早停: 连续 {config['patience']} 个epoch未改善")
@@ -1374,7 +1597,8 @@ def main():
                 disabled_batches=config.get('disabled_batches', []),
                 task=args.task,
                 image_size=config.get('image_size', 256),
-                variant_key=args.variant
+                variant_key=args.variant,
+                triple_channel=config.get('triple_channel', False)
             )
 
             if args.task == 'segmentation':
@@ -1426,7 +1650,8 @@ def main():
                     disabled_batches=config.get('disabled_batches', []),
                     task=args.task,
                     image_size=config.get('image_size', 256),
-                    variant_key=variant_key
+                    variant_key=variant_key,
+                    triple_channel=config.get('triple_channel', False)
                 )
                 results[variant_key] = {**metrics, 'display_name': VARIANT_DISPLAY_NAMES[variant_key]}
 
