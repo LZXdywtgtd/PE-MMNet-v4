@@ -55,12 +55,18 @@ from models.pe_tsnet_multimodal import (
     create_model,
     get_arch_specific_config
 )
+from models.pe_tsnet_yolo import SwinYOLOFPN, ViTYOLOFPN
+from models.pe_tsnet_detr import DETRStyle
 from training.mono_loss import (
     MultimodalCrackLoss,
     SegmentationLoss,
     MultimodalSegmentationLoss,
     DiceLoss,
-    box_iou
+    box_iou,
+    YOLOLoss,
+    YOLOTargetAssigner,
+    DETRLoss,
+    HungarianMatcher
 )
 from utils.console import (
     print_title, print_section, print_result, print_results_table,
@@ -297,6 +303,10 @@ VARIANT_MODELS = {
     'add': ModelAdd,
     'cross_attn': ModelCrossAttn,
     'full': PETSNetMultimodal,
+    # 新增 YOLO-FPN 和 DETR 变体
+    'swin_yolo_fpn': SwinYOLOFPN,
+    'vit_yolo_fpn': ViTYOLOFPN,
+    'detr_style': DETRStyle,
 }
 
 VARIANT_DISPLAY_NAMES = {
@@ -306,6 +316,10 @@ VARIANT_DISPLAY_NAMES = {
     'add': '双分支+加法',
     'cross_attn': 'Cross-Attention',
     'full': '完整MM-DBFNet',
+    # 新增变体
+    'swin_yolo_fpn': 'Swin-YOLO-FPN',
+    'vit_yolo_fpn': 'ViT-YOLO-FPN',
+    'detr_style': 'DETR风格',
 }
 
 
@@ -316,8 +330,12 @@ VARIANT_DISPLAY_NAMES = {
 def evaluate_model(model, device, data_roots=None, predict_offset=0,
                   seq_len=300, seq_interp_mode='interpolate',
                   remove_contours=False, disabled_batches=None,
-                  task='detection', image_size=256):
-    """评估模型性能"""
+                  task='detection', image_size=256, variant_key=None):
+    """评估模型性能
+
+    Args:
+        variant_key: 模型变体标识，用于判断是否需要解包 (output, density) 元组
+    """
     if data_roots is None:
         data_roots = get_data_batches()
 
@@ -336,6 +354,9 @@ def evaluate_model(model, device, data_roots=None, predict_offset=0,
     model = model.to(device)
     model.eval()
 
+    # 判断是否为新变体（返回元组）
+    is_new_variant = variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn', 'detr_style']
+
     all_preds, all_targets = [], []
 
     # 分割任务专用：收集 Dice 系数
@@ -344,7 +365,16 @@ def evaluate_model(model, device, data_roots=None, predict_offset=0,
     with torch.no_grad():
         for (seq_1d, img_2d), labels in test_loader:
             seq_1d, img_2d = seq_1d.to(device), img_2d.to(device)
-            outputs = model(seq_1d, img_2d)
+            raw_outputs = model(seq_1d, img_2d)
+
+            # 解包新变体的输出（train/eval模式下返回元组）
+            if is_new_variant:
+                outputs, _ = raw_outputs  # (B, 6) 或 (B, N, 6)
+                # 如果是网格预测，取第一个（推理模式下模型已处理）
+                if outputs.dim() == 3:
+                    outputs = outputs[:, 0, :]  # 取第一个预测
+            else:
+                outputs = raw_outputs
 
             if task == 'detection':
                 # 检测任务：outputs 是 (batch, 6)
@@ -490,8 +520,8 @@ def eval_checkpoint(checkpoint_path, device, image_size=None):
     matched = {k: v for k, v in state_dict.items() if k in model_dict}
     model.load_state_dict(matched, strict=False)
 
-    # 评估（传递任务类型和图像尺寸）
-    return evaluate_model(model, device, task=task, image_size=image_size)
+    # 评估（传递任务类型、图像尺寸和变体标识）
+    return evaluate_model(model, device, task=task, image_size=image_size, variant_key=variant_key)
 
 
 # =============================================================================
@@ -503,6 +533,11 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
     # 根据任务类型选择损失函数
     task = config.get('task', 'detection')
     fp16_enabled = config.get('fp16', True)  # 默认启用 FP16
+    variant_key = config.get('variant', 'full')
+
+    # 新变体专用损失
+    assigner = None
+    matcher = None
 
     if task == 'segmentation':
         criterion = SegmentationLoss()
@@ -513,12 +548,24 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
         )
     else:
         # detection 模式
-        criterion = MultimodalCrackLoss(
-            lambda_mse_density=config['lambda_mse'],
-            lambda_mono=config['lambda_mono'],
-            lambda_loc=config['lambda_loc'],
-            lambda_conf=config['lambda_conf']
-        )
+        # 检查是否为新变体
+        if variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn']:
+            criterion = YOLOLoss(
+                lambda_box=1.0,
+                lambda_conf=1.0,
+                lambda_mono=0.1
+            )
+            assigner = YOLOTargetAssigner(grid_size=16, nearby_range=2)
+        elif variant_key == 'detr_style':
+            matcher = HungarianMatcher()
+            criterion = DETRLoss(matcher=matcher)
+        else:
+            criterion = MultimodalCrackLoss(
+                lambda_mse_density=config['lambda_mse'],
+                lambda_mono=config['lambda_mono'],
+                lambda_loc=config['lambda_loc'],
+                lambda_conf=config['lambda_conf']
+            )
 
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=config['learning_rate'], weight_decay=0.01
@@ -553,6 +600,39 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
 
         if fp16_enabled:
             with torch.cuda.amp.autocast():
+                # 检查是否为新变体
+                is_new_variant = variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn', 'detr_style']
+                if is_new_variant:
+                    outputs, global_density = model(seq_1d, img_2d)
+                    if variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn']:
+                        assigned_target, pos_mask = assigner(labels)
+                        loss = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                    else:  # detr_style
+                        indices = matcher(outputs, {'labels': labels})
+                        loss = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                else:
+                    outputs = model(seq_1d, img_2d)
+                    if task == 'segmentation':
+                        loss = criterion(outputs, labels)
+                    elif task == 'multitask':
+                        loss = criterion(outputs, labels)
+                    else:
+                        loss, _ = criterion(outputs, labels)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # 检查是否为新变体
+            is_new_variant = variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn', 'detr_style']
+            if is_new_variant:
+                outputs, global_density = model(seq_1d, img_2d)
+                if variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn']:
+                    assigned_target, pos_mask = assigner(labels)
+                    loss = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                else:  # detr_style
+                    indices = matcher(outputs, {'labels': labels})
+                    loss = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
+            else:
                 outputs = model(seq_1d, img_2d)
                 if task == 'segmentation':
                     loss = criterion(outputs, labels)
@@ -560,17 +640,6 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                     loss = criterion(outputs, labels)
                 else:
                     loss, _ = criterion(outputs, labels)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            outputs = model(seq_1d, img_2d)
-            if task == 'segmentation':
-                loss = criterion(outputs, labels)
-            elif task == 'multitask':
-                loss = criterion(outputs, labels)
-            else:
-                loss, _ = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
 
@@ -606,6 +675,41 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
 
                 if fp16_enabled:
                     with torch.cuda.amp.autocast():
+                        # 检查是否为新变体
+                        is_new_variant = variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn', 'detr_style']
+                        if is_new_variant:
+                            outputs, global_density = model(seq_1d, img_2d)
+                            if variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn']:
+                                assigned_target, pos_mask = assigner(labels)
+                                loss_total = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                            else:  # detr_style
+                                indices = matcher(outputs, {'labels': labels})
+                                loss_total = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                        else:
+                            outputs = model(seq_1d, img_2d)
+                            if task == 'segmentation':
+                                loss_total = criterion(outputs, labels)
+                            elif task == 'multitask':
+                                loss_total = criterion(outputs, labels)
+                            else:
+                                loss_total, _ = criterion(outputs, labels)
+                    scaler.scale(loss_total).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    # 检查是否为新变体
+                    is_new_variant = variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn', 'detr_style']
+                    if is_new_variant:
+                        outputs, global_density = model(seq_1d, img_2d)
+                        if variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn']:
+                            assigned_target, pos_mask = assigner(labels)
+                            loss_total = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                        else:  # detr_style
+                            indices = matcher(outputs, {'labels': labels})
+                            loss_total = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                    else:
                         outputs = model(seq_1d, img_2d)
                         if task == 'segmentation':
                             loss_total = criterion(outputs, labels)
@@ -613,19 +717,6 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                             loss_total = criterion(outputs, labels)
                         else:
                             loss_total, _ = criterion(outputs, labels)
-                    scaler.scale(loss_total).backward()
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    outputs = model(seq_1d, img_2d)
-                    if task == 'segmentation':
-                        loss_total = criterion(outputs, labels)
-                    elif task == 'multitask':
-                        loss_total = criterion(outputs, labels)
-                    else:
-                        loss_total, _ = criterion(outputs, labels)
                     loss_total.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
@@ -654,16 +745,26 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                     labels = tuple(l.to(device) for l in labels)
                 else:
                     labels = labels.to(device)
-                outputs = model(seq_1d, img_2d)
-
-                # 根据任务类型计算损失
-                if task == 'segmentation':
-                    loss_total = criterion(outputs, labels)
-                elif task == 'multitask':
-                    loss_total = criterion(outputs, labels)
+                # 检查是否为新变体
+                is_new_variant = variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn', 'detr_style']
+                if is_new_variant:
+                    outputs, global_density = model(seq_1d, img_2d)
+                    if variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn']:
+                        assigned_target, pos_mask = assigner(labels)
+                        loss_total = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                    else:  # detr_style
+                        indices = matcher(outputs, {'labels': labels})
+                        loss_total = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
                 else:
-                    # detection: outputs (batch, 6), labels (batch, 6)
-                    loss_total, _ = criterion(outputs, labels)
+                    outputs = model(seq_1d, img_2d)
+                    # 根据任务类型计算损失
+                    if task == 'segmentation':
+                        loss_total = criterion(outputs, labels)
+                    elif task == 'multitask':
+                        loss_total = criterion(outputs, labels)
+                    else:
+                        # detection: outputs (batch, 6), labels (batch, 6)
+                        loss_total, _ = criterion(outputs, labels)
 
                 val_loss += loss_total.item()
 
@@ -871,7 +972,8 @@ def main():
 
     # 模型
     parser.add_argument('--variant', type=str, default='full',
-                        choices=['1d_only', '2d_only', 'concat', 'add', 'cross_attn', 'full'],
+                        choices=['1d_only', '2d_only', 'concat', 'add', 'cross_attn', 'full',
+                                'swin_yolo_fpn', 'vit_yolo_fpn', 'detr_style'],
                         help='模型变体（train模式）')
 
     # 架构配置（train模式，可选）
@@ -980,6 +1082,7 @@ def main():
         # 检查点控制
         'force_retrain': args.force_retrain,
         'resume': args.resume,
+        'variant': args.variant,  # 用于 train_model 选择损失函数
         # 记录原始值用于追溯
         'final_image_size': auto_config['image_size'],
         'final_batch_size': auto_config['batch_size'],
@@ -1091,7 +1194,8 @@ def main():
                 remove_contours=config.get('remove_contours', False),
                 disabled_batches=config.get('disabled_batches', []),
                 task=args.task,
-                image_size=config.get('image_size', 256)
+                image_size=config.get('image_size', 256),
+                variant_key=args.variant
             )
 
             if args.task == 'segmentation':
@@ -1142,7 +1246,8 @@ def main():
                     remove_contours=config.get('remove_contours', False),
                     disabled_batches=config.get('disabled_batches', []),
                     task=args.task,
-                    image_size=config.get('image_size', 256)
+                    image_size=config.get('image_size', 256),
+                    variant_key=variant_key
                 )
                 results[variant_key] = {**metrics, 'display_name': VARIANT_DISPLAY_NAMES[variant_key]}
 

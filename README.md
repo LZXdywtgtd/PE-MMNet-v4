@@ -91,14 +91,30 @@ python run_train.py --mode eval --checkpoint ./checkpoints/xxx.pt
 
 ### 模型变体
 
-| 变体 | 说明 |
-|------|------|
-| `full` | 完整 MM-DBFNet（默认） |
-| `1d_only` | 仅时序分支 |
-| `2d_only` | 仅空间分支 |
-| `concat` | 双分支拼接融合 |
-| `add` | 双分支加法融合 |
-| `cross_attn` | Cross-Attention 融合 |
+| 变体 | 说明 | 2D骨干 | 检测方式 |
+|------|------|---------|----------|
+| `full` | 完整 MM-DBFNet（默认） | ResNet-18 | MLP回归 |
+| `1d_only` | 仅时序分支 | - | MLP回归 |
+| `2d_only` | 仅空间分支 | ResNet-18 | MLP回归 |
+| `concat` | 双分支拼接融合 | ResNet-18 | MLP回归 |
+| `add` | 双分支加法融合 | ResNet-18 | MLP回归 |
+| `cross_attn` | Cross-Attention 融合 | ResNet-18 | MLP回归 |
+| `swin_yolo_fpn` | Swin-YOLO-FPN | Swin-Tiny | YOLO网格回归 |
+| `vit_yolo_fpn` | ViT-YOLO-FPN | ViT-Small | YOLO网格回归 |
+| `detr_style` | DETR风格 | ResNet-18 | Transformer |
+
+### 新增变体训练示例
+
+```bash
+# Swin-YOLO-FPN（推荐）
+python run_train.py --mode train --variant swin_yolo_fpn --epochs 100
+
+# ViT-YOLO-FPN
+python run_train.py --mode train --variant vit_yolo_fpn --epochs 100
+
+# DETR风格（需要更小学习率）
+python run_train.py --mode train --variant detr_style --epochs 100 --lr 1e-4
+```
 
 ### 时间偏移预测
 
@@ -126,10 +142,12 @@ project_v4/
 │   └── dataset_multimodal.py
 │
 ├── models/                   # 模型定义
-│   └── pe_tsnet_multimodal.py
+│   ├── pe_tsnet_multimodal.py  # 原有模型
+│   ├── pe_tsnet_yolo.py         # YOLO-FPN变体
+│   └── pe_tsnet_detr.py         # DETR风格变体
 │
 ├── training/                 # 损失函数
-│   └── mono_loss.py
+│   └── mono_loss.py             # 包含YOLO/DETR损失
 │
 ├── tools/                    # 工具
 │   ├── batch_train_gui.py    # 批量训练工具

@@ -700,3 +700,332 @@ class MultimodalSegmentationLoss(nn.Module):
         else:
             # 只有分割标签，退化为纯分割
             return loss_seg
+
+
+# =============================================================================
+# YOLO 损失函数（用于 Swin-YOLO-FPN 和 ViT-YOLO-FPN）
+# =============================================================================
+
+class YOLOTargetAssigner(nn.Module):
+    """
+    YOLO 目标分配器
+
+    将真实目标分配到 YOLO 网格：
+    - 中心网格：完整目标标签
+    - 附近网格（可选）：降低置信度的目标标签
+
+    Args:
+        grid_size: 网格尺寸（默认 16 -> 256 个网格）
+        nearby_range: 附近网格分配范围（默认 2 -> 5x5 区域）
+    """
+
+    def __init__(self, grid_size=16, nearby_range=2):
+        super().__init__()
+        self.grid_size = grid_size
+        self.nearby_range = nearby_range
+
+    def forward(self, targets):
+        """
+        分配目标到网格
+
+        Args:
+            targets: (B, 6) 真实标签 [x, y, l, w, conf, density]
+
+        Returns:
+            assigned_targets: (B, num_grids, 6) 每个网格的目标标签
+            positive_mask: (B, num_grids) 正样本掩码
+        """
+        B = targets.size(0)
+        device = targets.device
+        num_grids = self.grid_size * self.grid_size
+
+        # 初始化
+        assigned = torch.zeros(B, num_grids, 6, device=device)
+        positive_mask = torch.zeros(B, num_grids, dtype=torch.bool, device=device)
+
+        for b in range(B):
+            # 提取目标坐标
+            x, y = targets[b, 0].item(), targets[b, 1].item()
+            conf = targets[b, 4].item()
+            density = targets[b, 5].item()
+
+            # 计算中心网格索引
+            cell_x = min(int(x * self.grid_size), self.grid_size - 1)
+            cell_y = min(int(y * self.grid_size), self.grid_size - 1)
+            center_idx = cell_y * self.grid_size + cell_x
+
+            # 分配到中心网格
+            assigned[b, center_idx] = targets[b]
+            positive_mask[b, center_idx] = True
+
+            # 分配到附近网格（增强正样本）
+            for dy in range(-self.nearby_range, self.nearby_range + 1):
+                for dx in range(-self.nearby_range, self.nearby_range + 1):
+                    if dx == 0 and dy == 0:
+                        continue
+
+                    nx, ny = cell_x + dx, cell_y + dy
+
+                    # 检查是否在边界内
+                    if 0 <= nx < self.grid_size and 0 <= ny < self.grid_size:
+                        idx = ny * self.grid_size + nx
+
+                        # 附近网格使用相同目标，但降低置信度
+                        nearby_target = targets[b].clone()
+                        nearby_target[4] = conf * 0.8  # 降低置信度
+                        assigned[b, idx] = nearby_target
+                        positive_mask[b, idx] = True
+
+        return assigned, positive_mask
+
+
+class YOLOLoss(nn.Module):
+    """
+    YOLO 检测损失
+
+    包含：
+    - 定位损失 (DIoU)
+    - 置信度损失 (BCE)
+    - 密度损失 (MSE)
+    - 单调性损失（简化版）
+
+    Args:
+        lambda_box: 定位损失权重
+        lambda_conf: 置信度损失权重
+        lambda_mono: 单调性损失权重
+    """
+
+    def __init__(self, lambda_box=1.0, lambda_conf=1.0, lambda_mono=0.1):
+        super().__init__()
+        self.lambda_box = lambda_box
+        self.lambda_conf = lambda_conf
+        self.lambda_mono = lambda_mono
+
+    def forward(self, pred, target, global_density, target_density, positive_mask=None):
+        """
+        计算 YOLO 损失
+
+        Args:
+            pred: (B, num_grids, 6) 网格预测
+            target: (B, num_grids, 6) 分配后的目标
+            global_density: (B, 1) 最大密度（用于单调性）
+            target_density: (B, 1) 目标密度
+            positive_mask: (B, num_grids) 正样本掩码
+
+        Returns:
+            loss: 总损失
+        """
+        # 如果没有提供正样本掩码，使用默认策略
+        if positive_mask is None:
+            positive_mask = (target[..., 4:5].sum(dim=1) > 0).squeeze(-1)
+
+        # ========== 定位损失 (DIoU) ==========
+        pred_boxes = pred[..., :4][positive_mask]
+        target_boxes = target[..., :4][positive_mask]
+
+        if len(pred_boxes) > 0:
+            loss_box = diou_loss(pred_boxes, target_boxes)
+        else:
+            loss_box = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+
+        # ========== 置信度损失 ==========
+        pred_conf = pred[..., 4:5][positive_mask]
+        target_conf = target[..., 4:5][positive_mask]
+
+        if len(pred_conf) > 0:
+            loss_conf = F.binary_cross_entropy(pred_conf, target_conf)
+        else:
+            loss_conf = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+
+        # ========== 密度 MSE 损失 ==========
+        loss_density = F.mse_loss(global_density, target_density)
+
+        # ========== 单调性损失（简化版） ==========
+        # 对于 YOLO/DETR，密度是单值输出，简化为与目标密度的差异
+        loss_mono = torch.abs(global_density - target_density).mean()
+
+        # ========== 总损失 ==========
+        loss_total = (
+            self.lambda_box * loss_box +
+            self.lambda_conf * loss_conf +
+            self.lambda_mono * loss_mono +
+            loss_density
+        )
+
+        return loss_total
+
+
+# =============================================================================
+# DETR 损失函数
+# =============================================================================
+
+class HungarianMatcher(nn.Module):
+    """
+    Hungarian Matcher for DETR
+
+    使用 scipy.optimize.linear_sum_assignment 找到预测与目标的最佳匹配
+
+    Args:
+        cost_bbox: 边界框成本权重
+        cost_density: 密度成本权重
+    """
+
+    def __init__(self, cost_bbox=1.0, cost_density=1.0):
+        super().__init__()
+        self.cost_bbox = cost_bbox
+        self.cost_density = cost_density
+
+    @torch.no_grad()
+    def forward(self, outputs, targets):
+        """
+        Hungarian 匹配
+
+        Args:
+            outputs: (B, num_queries, 6) 预测 [x, y, l, w, conf, density]
+            targets: dict {'labels': (B, 6)} 真实标签
+
+        Returns:
+            indices: list of (pred_idx, target_idx) pairs per batch
+        """
+        from scipy.optimize import linear_sum_assignment
+
+        B, num_queries = outputs.shape[:2]
+        device = outputs.device
+
+        # 提取预测和目标
+        out_bbox = outputs[..., :4]  # (B, num_queries, 4)
+        out_density = outputs[..., 5:6]  # (B, num_queries, 1)
+
+        tgt_labels = targets['labels']
+        num_targets = tgt_labels.shape[1] if tgt_labels.dim() > 1 else 1
+        tgt_bbox = tgt_labels[..., :4].unsqueeze(1) if tgt_labels.dim() == 2 else tgt_labels[..., :4].unsqueeze(1).unsqueeze(1)
+        tgt_density = tgt_labels[..., 5:6].unsqueeze(1) if tgt_labels.dim() == 2 else tgt_labels[..., 5:6].unsqueeze(1).unsqueeze(1)
+
+        # 构建成本矩阵
+        # 边界框成本：L1 距离
+        cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)  # (B, num_queries, num_targets)
+
+        # 密度成本：L1 距离
+        cost_density = torch.abs(out_density - tgt_density)  # (B, num_queries, num_targets)
+
+        # 总成本
+        cost_matrix = self.cost_bbox * cost_bbox + self.cost_density * cost_density
+        # 移除目标维度（假设每个样本只有一个目标）
+        cost_matrix = cost_matrix.squeeze(-1)  # (B, num_queries)
+
+        # Hungarian 匹配
+        indices = []
+        for b in range(B):
+            # scipy 需要 2D 矩阵 (num_queries x num_targets)
+            cost_b = cost_matrix[b].cpu().numpy()
+            # 确保是 2D
+            if cost_b.ndim == 1:
+                cost_b = cost_b.reshape(-1, 1)
+            row_ind, col_ind = linear_sum_assignment(cost_b)
+
+            # 转换为 PyTorch 张量
+            indices.append(torch.tensor(
+                list(zip(row_ind, col_ind)),
+                dtype=torch.long,
+                device=device
+            ))
+
+        return indices
+
+
+class DETRLoss(nn.Module):
+    """
+    DETR 检测损失
+
+    包含：
+    - 定位损失 (Smooth L1)
+    - 置信度损失 (BCE)
+    - 密度损失 (MSE)
+    - 单调性损失（简化版）
+
+    与 YOLOLoss 的区别：
+    - 使用 Hungarian Matching 进行预测-目标匹配
+    - 每个样本可能有不同的匹配对
+
+    Args:
+        matcher: HungarianMatcher 实例
+        lambda_bbox: 定位损失权重
+        lambda_conf: 置信度损失权重
+        lambda_mono: 单调性损失权重
+    """
+
+    def __init__(self, matcher=None, lambda_bbox=1.0, lambda_conf=1.0, lambda_mono=0.1):
+        super().__init__()
+
+        if matcher is None:
+            matcher = HungarianMatcher()
+
+        self.matcher = matcher
+        self.lambda_bbox = lambda_bbox
+        self.lambda_conf = lambda_conf
+        self.lambda_mono = lambda_mono
+
+    def forward(self, pred, target, global_density, target_density, indices=None):
+        """
+        计算 DETR 损失
+
+        Args:
+            pred: (B, num_queries, 6) query 预测
+            target: dict {'labels': (B, 6)} 真实标签
+            global_density: (B, 1) 最大密度
+            target_density: (B, 1) 目标密度
+            indices: Hungarian 匹配结果（可选）
+
+        Returns:
+            loss: 总损失
+        """
+        # 获取匹配结果
+        if indices is None:
+            indices = self.matcher(pred, target)
+
+        # 初始化损失
+        loss_bbox = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        loss_conf = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+
+        # 计算匹配的损失
+        for b, idx_per_batch in enumerate(indices):
+            if len(idx_per_batch) == 0:
+                continue
+
+            pred_idx, tgt_idx = idx_per_batch[:, 0], idx_per_batch[:, 1]
+
+            # target['labels'] 是 (B, 6)，tgt_idx 是匹配的 query 索引
+            # 我们用 pred[b, pred_idx] 与 target['labels'][b] 进行比较
+            tgt_labels = target['labels'][b]  # (6,)
+
+            # 定位损失 (Smooth L1) - 比较预测的 query 与目标
+            loss_bbox += F.smooth_l1_loss(
+                pred[b, pred_idx, :4],
+                tgt_labels[:4].unsqueeze(0).expand(len(pred_idx), -1)
+            ).mean()
+
+            # 置信度损失 (BCE)
+            loss_conf += F.binary_cross_entropy(
+                pred[b, pred_idx, 4:5],
+                tgt_labels[4:5].unsqueeze(0).expand(len(pred_idx), -1)
+            ).mean()
+
+        # 平均
+        B = pred.size(0)
+        loss_bbox = loss_bbox / B
+        loss_conf = loss_conf / B
+
+        # 密度和单调性损失
+        loss_density = F.mse_loss(global_density, target_density)
+        loss_mono = torch.abs(global_density - target_density).mean()
+
+        # 总损失
+        loss_total = (
+            self.lambda_bbox * loss_bbox +
+            self.lambda_conf * loss_conf +
+            self.lambda_mono * loss_mono +
+            loss_density
+        )
+
+        return loss_total
+

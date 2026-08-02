@@ -6,6 +6,68 @@
 
 ---
 
+## [v4.4.0] - 2026-08-02
+
+### 新增：YOLO-FPN 和 DETR 风格变体
+
+#### 新增模型文件
+
+- **`models/pe_tsnet_yolo.py`**：Swin-YOLO-FPN 和 ViT-YOLO-FPN 变体
+  - `SwinBackbone2D`: Swin-Tiny 骨干网络（使用 timm）
+  - `ViTYOLOBackbone2D`: ViT-Small 骨干网络
+  - `FPNNeck`: Feature Pyramid Network 颈部网络
+  - `YOLOFPNHead`: YOLO 检测头
+  - `SwinYOLOFPN`: Swin-Tiny + FPN + YOLO 网格回归
+  - `ViTYOLOFPN`: ViT-Small + FPN + YOLO 网格回归
+
+- **`models/pe_tsnet_detr.py`**：DETR 风格变体
+  - `PositionalEncoding2D`: 2D 正弦位置编码
+  - `DETRDecoder`: Transformer 解码器 + 可学习 Object Queries
+  - `DETRHead`: DETR 预测头
+  - `DETRStyle`: ResNet-18 + Transformer + Hungarian Matching
+
+#### 新增损失函数
+
+- **`training/mono_loss.py`** 新增：
+  - `YOLOTargetAssigner`: YOLO 目标分配器（多网格正样本策略）
+  - `YOLOLoss`: YOLO 检测损失（DIoU + BCE + 密度）
+  - `HungarianMatcher`: Hungarian 匹配器（使用 scipy.optimize.linear_sum_assignment）
+  - `DETRLoss`: DETR 检测损失（匹配 + Smooth L1 + BCE）
+
+#### 架构设计
+
+- **训练/推理模式分离**：使用 `self.training` 属性区分，无需额外参数
+  - 训练模式：返回完整网格/query 预测
+  - 推理模式：返回最高 conf 的预测
+- **单调性约束适配**：简化为单值密度预测损失（YOLO/DETR 无时序信息）
+- **任务支持**：仅 detection（符合架构设计原则）
+
+#### 新增变体命令
+
+```bash
+# Swin-YOLO-FPN
+python run_train.py --mode train --variant swin_yolo_fpn --epochs 100
+
+# ViT-YOLO-FPN
+python run_train.py --mode train --variant vit_yolo_fpn --epochs 100
+
+# DETR风格（需要更小学习率）
+python run_train.py --mode train --variant detr_style --epochs 100 --lr 1e-4
+```
+
+#### 依赖更新
+
+- `requirements.txt` 新增 `timm>=0.9.0`
+
+#### 代码修复
+
+- **`evaluate_model()` 函数增强**
+  - 新增 `variant_key` 参数
+  - 自动解包新变体的 `(output, global_density)` 元组
+  - 支持推理模式下取最优预测
+
+---
+
 ## [v4.3.0] - 2026-07-30
 
 ### 文档重写 + P2 优化项完成
