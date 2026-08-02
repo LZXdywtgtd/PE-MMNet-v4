@@ -714,6 +714,8 @@ def train_variant(variant_key, config, device, data_roots=None):
     backbone_1d = config.get('backbone_1d', 'cnn_attn')
     fusion = config.get('fusion', 'cross_attn')
     task = config.get('task', 'detection')
+    force_retrain = config.get('force_retrain', False)
+    resume_path = config.get('resume', None)
 
     # 修复：检查点文件名包含 variant_key，避免不同变体互相覆盖
     # 格式：{variant}_{backbone_2d}_{backbone_1d}_{fusion}_task{task}_offset{offset}_best.pt
@@ -752,7 +754,38 @@ def train_variant(variant_key, config, device, data_roots=None):
         start_epoch = 0
         best_metric = float('inf')
 
-    # Case 2: predict_offset == 0 且检查点存在 → 加载
+    # Case 2: force_retrain=True → 强制从头训练
+    elif force_retrain:
+        if os.path.exists(save_path):
+            print_warning(f"[WARN] 检测到检查点存在，但 force_retrain=True")
+            print_warning(f"   策略：强制重新训练，不加载旧权重")
+        model = create_variant_model()
+        start_epoch = 0
+        best_metric = float('inf')
+
+    # Case 3: 指定 resume 路径 → 加载指定检查点并继续训练
+    elif resume_path:
+        if os.path.exists(resume_path):
+            print_info(f"[OK] 从指定路径加载检查点: {resume_path}")
+            print_info(f"   继续训练...")
+            model = create_variant_model()
+            checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+                start_epoch = checkpoint.get('epoch', 0) + 1
+                best_metric = checkpoint.get('best_metric', float('inf'))
+            else:
+                model.load_state_dict(checkpoint)
+                start_epoch = 0
+                best_metric = float('inf')
+        else:
+            print_error(f"[ERROR] 指定的 resume 路径不存在: {resume_path}")
+            print_info(f"   策略：从头开始训练")
+            model = create_variant_model()
+            start_epoch = 0
+            best_metric = float('inf')
+
+    # Case 4: predict_offset == 0 且检查点存在 → 加载并返回
     elif os.path.exists(save_path):
         print_info(f"[OK] 加载检查点: {save_path}")
         model = create_variant_model()
@@ -788,6 +821,15 @@ def train_variant(variant_key, config, device, data_roots=None):
         disabled_batches=config.get('disabled_batches', []),
         task=task
     )
+
+    # 验证数据集非空
+    if len(train_loader.dataset) == 0:
+        print_error("错误: 训练数据为空!")
+        raise ValueError("训练数据为空，请检查数据路径配置")
+    if len(test_loader.dataset) == 0:
+        print_error("错误: 测试数据为空!")
+        raise ValueError("测试数据为空，请检查数据路径配置")
+
     print_info(f"训练样本: {len(train_loader.dataset)}, 测试样本: {len(test_loader.dataset)}")
     if predict_offset > 0:
         print_info(f"时间偏移: 预测 {predict_offset} 步后的标签 ({predict_offset * 0.05}s)")
@@ -850,16 +892,14 @@ def main():
                         choices=['interpolate', 'pool'],
                         help='长序列处理模式：interpolate（插值）或 pool（池化），默认interpolate')
 
-    # 图像尺寸
-    parser.add_argument('--image_size', type=int, default=512,
+    # 图像尺寸（默认None，由auto_select_config根据显存自动选择）
+    parser.add_argument('--image_size', type=int, default=None,
                         choices=[256, 384, 512, 768, 1024],
                         help='图像尺寸：256 / 384 / 512(默认) / 768 / 1024，更高分辨率需要更多显存')
 
     # FP16 混合精度（默认启用）
-    parser.add_argument('--fp16', action='store_true', default=True,
-                        help='启用 FP16 混合精度（默认开启，省显存 50%%）')
-    parser.add_argument('--no_fp16', action='store_true',
-                        help='禁用 FP16 混合精度')
+    parser.add_argument('--no_fp16', action='store_true', default=False,
+                        help='禁用 FP16 混合精度（默认启用，省显存 50%%）')
 
     # 任务模式
     parser.add_argument('--task', type=str, default='detection',
@@ -937,6 +977,9 @@ def main():
         'remove_contours': args.remove_contours,
         'disabled_batches': args.disable_batch,
         'task': args.task,
+        # 检查点控制
+        'force_retrain': args.force_retrain,
+        'resume': args.resume,
         # 记录原始值用于追溯
         'final_image_size': auto_config['image_size'],
         'final_batch_size': auto_config['batch_size'],

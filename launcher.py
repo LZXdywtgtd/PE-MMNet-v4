@@ -9,8 +9,7 @@ PE-MMNet v4 交互式训练启动器
 5. 消融实验预设
 
 用法：
-    python train_launcher.py               # 单次/批量训练（自动检测）
-    python train_launcher.py --batch       # 批量训练（显式指定）
+    python train_launcher.py               # 交互式（统一入口）
     python train_launcher.py --quick ...   # 快捷批量训练
 """
 

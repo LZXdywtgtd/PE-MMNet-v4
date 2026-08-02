@@ -153,8 +153,8 @@ class TrainingCommand:
         return ' '.join(self.to_args())
 
     def get_checkpoint_name(self) -> str:
-        """获取检查点文件名"""
-        return f"{self.backbone_2d}_{self.backbone_1d}_{self.fusion}_task{self.task}_offset{self.predict_offset}_best.pt"
+        """获取检查点文件名（与run_train.py保持一致）"""
+        return f"{self.variant}_{self.backbone_2d}_{self.backbone_1d}_{self.fusion}_task{self.task}_offset{self.predict_offset}_best.pt"
 
     def get_checkpoint_path(self) -> str:
         """获取检查点完整路径"""

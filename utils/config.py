@@ -31,8 +31,21 @@ def load_config():
     config_path = os.path.join(PROJECT_ROOT, CONFIG_FILE)
 
     if os.path.exists(config_path):
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            print(f"警告: 配置文件格式错误: {e}")
+            print(f"  路径: {config_path}")
+            print(f"  将重新创建配置文件")
+            # 备份损坏的配置
+            backup_path = config_path + '.bak'
+            try:
+                import shutil
+                shutil.copy(config_path, backup_path)
+                print(f"  已备份到: {backup_path}")
+            except (OSError, shutil.Error) as e:
+                print(f"  备份失败: {e}")
     return None
 
 
@@ -133,8 +146,9 @@ def ensure_config(interactive=True):
                 os.makedirs(data_root, exist_ok=True)
                 print(f"  已创建目录: {data_root}")
                 break
-            except:
-                pass
+            except OSError as e:
+                print(f"  创建目录失败: {e}")
+                print("  请手动创建目录或检查路径权限")
 
     # 保存配置
     new_config = config or {}
