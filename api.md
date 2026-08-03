@@ -240,7 +240,50 @@ img_aug, _, labels_aug, _ = cutmix(img1, img2, labels1, labels2)
 
 ## 5. 训练脚本 (run_train.py)
 
+### ETAEstimator
+
+指数移动平均 ETA 估算器。
+
+```python
+from run_train import ETAEstimator
+
+# 初始化
+eta = ETAEstimator(total_epochs=150, alpha=0.3)
+
+# 每轮更新
+eta.update(epoch_time)
+
+# 获取 ETA 信息
+info = eta.get_eta(current_epoch)
+# 返回:
+# {
+#     'ema': 1.3,              # 指数移动平均
+#     'eta_seconds': 175,      # 剩余秒数
+#     'eta_str': '2m55s',      # 格式化字符串
+#     'finish_time': '14:32', # 预计完成时间
+#     'confidence': '±0.2s',  # 置信区间
+#     'remaining_epochs': 135 # 剩余轮次
+# }
+```
+
+### estimate_training_time
+
+动态训练时间估算（训练前测量）。
+
+```python
+from run_train import estimate_training_time
+
+avg_time, total_minutes = estimate_training_time(
+    model, train_loader, test_loader,
+    criterion, optimizer, device, config
+)
+# 返回: (avg_epoch_time, estimated_total_minutes)
+# 自动保存/恢复模型状态
+```
+
 ### train_model
+
+训练模型。
 
 ```python
 from run_train import train_model
@@ -250,11 +293,15 @@ model, metrics = train_model(
     train_loader,
     test_loader,
     config,
-    device
+    device,
+    checkpoint_path=None,  # 可选：保存路径
+    task_id=None          # 可选：任务ID（团队协作）
 )
 ```
 
 ### evaluate_model
+
+评估模型。
 
 ```python
 from run_train import evaluate_model
@@ -294,7 +341,8 @@ model = staged_training(
     variant_key='resnet18',
     config=config,
     device=device,
-    data_roots=data_roots
+    data_roots=data_roots,
+    task_id=None       # 可选：任务ID
 )
 ```
 
@@ -322,7 +370,39 @@ export_team_configs('team_configs.txt')
 
 ---
 
-## 7. 配置模块 (utils.config)
+## 7. 团队协作 (team_train.py)
+
+### log_task_execution
+
+记录任务执行日志。
+
+```python
+from team_train import log_task_execution
+
+log_task_execution(
+    task_id='BASELINE_1',
+    status='completed',           # 'started', 'completed', 'failed', 'skipped'
+    duration_seconds=43200,       # 可选：执行时长
+    error=None                   # 可选：错误信息
+)
+# 写入 logs/team_training.log
+```
+
+### parse_task_id_from_filename
+
+从文件名解析任务ID。
+
+```python
+from team_train import parse_task_id_from_filename
+
+all_tasks = {'BASELINE_1': {}, 'OPT_GATED': {}}
+task_id = parse_task_id_from_filename('checkpoint_BASELINE_1_best.pt', all_tasks)
+# 返回: 'BASELINE_1' 或 None
+```
+
+---
+
+## 8. 配置模块 (utils.config)
 
 ```python
 from utils.config import load_config, get_data_root, get_data_batches
@@ -334,7 +414,7 @@ batches = get_data_batches()
 
 ---
 
-## 8. 控制台输出 (utils.console)
+## 9. 控制台输出 (utils.console)
 
 ```python
 from utils.console import (

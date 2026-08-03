@@ -622,7 +622,7 @@ def freeze_model_backbone(model, freeze_2d=True, freeze_1d=False, freeze_names=N
     return model
 
 
-def staged_training(variant_key, config, device, data_roots=None):
+def staged_training(variant_key, config, device, data_roots=None, task_id=None):
     """分阶段训练：先短序列预训练，再长序列微调
 
     Args:
@@ -630,11 +630,16 @@ def staged_training(variant_key, config, device, data_roots=None):
         config: 配置字典
         device: 设备
         data_roots: 数据根目录列表
+        task_id: 任务ID（用于检查点标记）
 
     Returns:
         model: 训练好的模型
     """
     from data.dataset_multimodal import create_multibatch_dataloaders
+
+    # 将 task_id 添加到 config
+    if task_id:
+        config['task_id'] = task_id
 
     if data_roots is None:
         data_roots = get_data_batches()
@@ -683,7 +688,7 @@ def staged_training(variant_key, config, device, data_roots=None):
     model = model.to(device)
 
     # 阶段1训练
-    model, _ = train_model(model, train_loader_1, test_loader_1, phase1_config, device)
+    model, _ = train_model(model, train_loader_1, test_loader_1, phase1_config, device, task_id=task_id)
 
     # 阶段2: 长序列微调
     print_title("阶段2: 长序列微调")
@@ -716,15 +721,165 @@ def staged_training(variant_key, config, device, data_roots=None):
         phase2_config = config.copy()
         phase2_config['epochs'] = phase2_epochs
         phase2_config['patience'] = config['patience']
-        model, _ = train_model(model, train_loader_2, test_loader_2, phase2_config, device)
+        model, _ = train_model(model, train_loader_2, test_loader_2, phase2_config, device, task_id=task_id)
     else:
         print_info("阶段1已完成全部训练，跳过阶段2")
 
     return model
 
 
-def train_model(model, train_loader, test_loader, config, device, checkpoint_path=None):
-    """训练模型"""
+# =============================================================================
+# ETA 估算器：指数移动平均 + 置信区间
+# =============================================================================
+
+class ETAEstimator:
+    """指数移动平均 ETA 估算器"""
+
+    def __init__(self, total_epochs, alpha=0.3):
+        self.total = total_epochs
+        self.alpha = alpha  # 近期权重
+        self.epoch_times = []
+        self.ema = None
+        self._epoch_start = None
+
+    def start_epoch(self):
+        """开始一个 epoch，计时"""
+        import time
+        self._epoch_start = time.time()
+
+    def end_epoch(self):
+        """结束一个 epoch，返回耗时"""
+        import time
+        if self._epoch_start is None:
+            return 0
+        epoch_time = time.time() - self._epoch_start
+        self._epoch_start = None
+        self.update(epoch_time)
+        return epoch_time
+
+    def update(self, epoch_time):
+        """更新一个 epoch 的耗时"""
+        self.epoch_times.append(epoch_time)
+        if self.ema is None:
+            self.ema = epoch_time
+        else:
+            self.ema = self.alpha * epoch_time + (1 - self.alpha) * self.ema
+
+    def get_eta(self, current_epoch):
+        """获取 ETA 信息"""
+        remaining = self.total - current_epoch
+        eta_seconds = self.ema * remaining
+
+        # 预计完成时间
+        finish = datetime.now() + __import__('datetime').timedelta(seconds=eta_seconds)
+
+        # 置信区间（至少5个epoch后才计算）
+        if len(self.epoch_times) >= 5:
+            import statistics
+            recent = self.epoch_times[-min(10, len(self.epoch_times)):]
+            std = statistics.stdev(recent) if len(recent) > 1 else 0
+            confidence = f"±{std:.1f}s"
+        else:
+            confidence = ""
+
+        # 格式化 ETA
+        if eta_seconds >= 3600:
+            eta_str = f"{eta_seconds/3600:.1f}h"
+        elif eta_seconds >= 60:
+            eta_str = f"{int(eta_seconds//60)}m{int(eta_seconds%60)}s"
+        else:
+            eta_str = f"{eta_seconds:.0f}s"
+
+        return {
+            'ema': self.ema,
+            'eta_seconds': eta_seconds,
+            'eta_str': eta_str,
+            'finish_time': finish.strftime("%H:%M"),
+            'confidence': confidence,
+            'remaining_epochs': remaining,
+        }
+
+
+def estimate_training_time(model, train_loader, test_loader, criterion, optimizer, device, config):
+    """
+    通过运行 2 个 epoch 测量实际训练速度（状态安全版）
+
+    估算前保存完整训练状态，估算后恢复。
+
+    返回: (avg_epoch_time, estimated_total_minutes)
+    """
+    import copy
+    from utils.console import print_info, print_warning
+
+    print_info("执行训练速度估算...")
+
+    # 保存训练状态
+    model_state = {k: v.clone() for k, v in model.state_dict().items()}
+    optimizer_state = {k: v.clone() for k, v in optimizer.state_dict().items()}
+    was_training = model.training
+
+    # 保存 scheduler 状态（如果有）
+    scheduler_state = None
+    if hasattr(model, '_scheduler'):
+        scheduler_state = copy.deepcopy(model._scheduler.state_dict())
+
+    times = []
+    model.train()
+
+    # 仅估算 2 个 epoch（足够估算速度）
+    num_warmup_epochs = 2
+
+    for i in range(num_warmup_epochs):
+        epoch_start = time.time()
+
+        # 训练一个 epoch
+        for (seq_1d, img_2d), labels in train_loader:
+            seq_1d = seq_1d.to(device)
+            img_2d = img_2d.to(device)
+            if isinstance(labels, tuple):
+                labels = tuple(l.to(device) for l in labels)
+            else:
+                labels = labels.to(device)
+
+            optimizer.zero_grad()
+            with torch.cuda.amp.autocast(enabled=config.get('fp16', True)):
+                output, _ = model(seq_1d, img_2d)
+                loss = criterion(output, labels)
+            loss.backward()
+            optimizer.step()
+
+        times.append(time.time() - epoch_start)
+
+    # 取后1个的平均（忽略第一个，可能较慢）
+    avg_time = times[-1] if times else 60.0
+
+    # 系数：验证开销 1.2x，早停缓冲 0.85x
+    overhead_factor = 1.2
+    early_stop_factor = 0.85
+
+    estimated_total = avg_time * config['epochs'] * overhead_factor * early_stop_factor
+
+    # 恢复训练状态
+    model.load_state_dict(model_state)
+    optimizer.load_state_dict(optimizer_state)
+    if was_training:
+        model.train()
+
+    print_info(f"估算完成: {avg_time:.1f}s/epoch, 预估总时间: ~{estimated_total/60:.1f}小时")
+
+    return avg_time, estimated_total / 60  # 返回(单轮时间, 总时间分钟)
+
+
+def train_model(model, train_loader, test_loader, config, device, checkpoint_path=None, task_id=None):
+    """训练模型
+
+    Args:
+        task_id: 任务ID（用于检查点标记，团队协作时使用）
+    """
+    # 将 task_id 添加到 config
+    if task_id:
+        config['task_id'] = task_id
+
     # 根据任务类型选择损失函数
     task = config.get('task', 'detection')
     fp16_enabled = config.get('fp16', True)  # 默认启用 FP16
@@ -783,6 +938,20 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
 
     # 记录第一轮的基准值（用于趋势计算）
     first_epoch_metrics = None
+
+    # 初始化 ETA 估算器
+    eta_estimator = ETAEstimator(config['epochs'], alpha=0.3)
+
+    # 动态训练时间估算（仅在首次训练时）
+    if config.get('do_estimate', True) and config['epochs'] >= 10:
+        try:
+            _, est_total_minutes = estimate_training_time(
+                model, train_loader, test_loader, criterion, optimizer, device, config
+            )
+            hours = est_total_minutes / 60
+            print_info(f"[预估] 总训练时间: ~{hours:.1f}小时 (基于前2轮测量)")
+        except Exception as e:
+            print_info(f"[估算] 估算失败，继续训练: {e}")
 
     # ============================================================
     # 干跑验证（提前触发 OOM，避免训练中途崩溃）
@@ -863,6 +1032,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
     for epoch in range(config['epochs']):
         model.train()
         train_loss = 0.0
+        epoch_start = time.time()  # 记录 epoch 开始时间
 
         try:
             for (seq_1d, img_2d), labels in train_loader:
@@ -1048,12 +1218,19 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             best_epoch = epoch + 1  # 记录最佳Epoch
             patience_counter = 0
             if checkpoint_path:
-                # 保存模型权重和元数据（task、config）
-                torch.save({
+                # 保存模型权重和元数据（task、config、task_id）
+                checkpoint_data = {
                     'model_state_dict': model.state_dict(),
                     'task': config.get('task', 'detection'),
                     'config': config,
-                }, checkpoint_path)
+                    'epoch': epoch,
+                    'best_loss': best_loss,
+                    'timestamp': datetime.now().isoformat(),
+                }
+                # 添加 task_id（如果有，团队协作时使用）
+                if config.get('task_id'):
+                    checkpoint_data['task_id'] = config['task_id']
+                torch.save(checkpoint_data, checkpoint_path)
         else:
             patience_counter += 1
 
@@ -1066,7 +1243,13 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             gpu_mem_allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
             gpu_mem_str = f"GPU: {gpu_mem_allocated:.1f}GB"
 
-        epoch_elapsed = time.time() - start_time
+        # 计算本轮耗时并更新 ETA
+        epoch_elapsed = time.time() - epoch_start
+        eta_estimator.update(epoch_elapsed)
+        eta_info = eta_estimator.get_eta(epoch + 1)
+
+        # 总耗时
+        total_elapsed = time.time() - start_time
 
         # 普通输出：两行对齐
         # 第一行：Epoch + 训练信息
@@ -1103,22 +1286,6 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             progress_pct = f"{progress * 100:.0f}%"
             progress_bar = '█' * int(progress * 20) + '░' * (20 - int(progress * 20))
 
-            # 预估剩余时间
-            total_elapsed = time.time() - start_time
-            if progress > 0:
-                eta_seconds = (total_elapsed / progress) * (1 - progress)
-                eta_epochs = int(eta_seconds / avg_time) if avg_time > 0 else 0
-                if eta_seconds >= 60:
-                    eta_str = f"{int(eta_seconds // 60)}m{int(eta_seconds % 60)}s"
-                else:
-                    eta_str = f"{eta_seconds:.0f}s"
-            else:
-                eta_str = "N/A"
-                eta_epochs = 0
-
-            # 平均每轮耗时
-            avg_time = total_elapsed / (epoch + 1)
-
             # 边框
             content_width = BOX_WIDTH - 2
             top_border = "╔" + "═" * content_width + "╗"
@@ -1152,9 +1319,12 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             print_info(print_box_line(f"       | MAE: {mae_arrow}{mae:.4f} ({mae_delta:+.4f}) | 违反率: {vio_arrow}{violations*100:.1f}% ({vio_delta:+.1f}%)"))
             print_info(print_box_divider())
 
-            # System行
-            print_info(print_box_line(f"System| 本轮: {epoch_elapsed:.1f}s | 累计: {total_elapsed:.1f}s | 平均: {avg_time:.1f}s/epoch"))
-            print_info(print_box_line(f"       | ETA: {eta_str} (~{eta_epochs}轮) | GPU: {gpu_part} | 总进度: {progress_pct}"))
+            # System行 - 使用 EMA + 置信区间 ETA
+            eta_display = f"ETA: {eta_info['eta_str']}" if eta_info['eta_str'] != '0.0s' else "ETA: 计算中"
+            confidence_display = f"{eta_info['confidence']}" if eta_info['confidence'] else ""
+            finish_display = f"| 完成: {eta_info['finish_time']}" if eta_info['finish_time'] else ""
+            print_info(print_box_line(f"System| EMA: {eta_info['ema']:.1f}s/epoch | {eta_display} {confidence_display} {finish_display}"))
+            print_info(print_box_line(f"       | GPU: {gpu_part} | 进度: {progress_pct} | 剩余: {eta_info['remaining_epochs']}轮"))
 
             print_info(bot_border)
 
@@ -1178,7 +1348,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
     return model, {'val_loss': best_loss}
 
 
-def train_variant(variant_key, config, device, data_roots=None):
+def train_variant(variant_key, config, device, data_roots=None, task_id=None):
     """训练单个变体（消融实验用）"""
     if data_roots is None:
         data_roots = get_data_batches()
@@ -1196,6 +1366,10 @@ def train_variant(variant_key, config, device, data_roots=None):
     task = config.get('task', 'detection')
     force_retrain = config.get('force_retrain', False)
     resume_path = config.get('resume', None)
+
+    # 将 task_id 添加到 config（用于检查点元数据）
+    if task_id:
+        config['task_id'] = task_id
 
     # 修复：检查点文件名包含 variant_key，避免不同变体互相覆盖
     # 格式：{variant}_{backbone_2d}_{backbone_1d}_{fusion}_task{task}_offset{offset}_best.pt
@@ -1317,7 +1491,7 @@ def train_variant(variant_key, config, device, data_roots=None):
 
     # 训练
     model, metrics = train_model(
-        model, train_loader, test_loader, config, device, save_path
+        model, train_loader, test_loader, config, device, save_path, task_id=task_id
     )
     model.eval()
     return model
@@ -1404,6 +1578,8 @@ def main():
     parser.add_argument('--resume', type=str, default=None, help='从检查点继续训练')
     parser.add_argument('--force_retrain', action='store_true',
                         help='强制重新训练，即使检查点已存在')
+    parser.add_argument('--task_id', type=str, default=None,
+                        help='任务ID（用于检查点标记，团队协作时使用）')
 
     # 分阶段训练
     parser.add_argument('--staged_train', action='store_true', default=False,
@@ -1589,7 +1765,7 @@ def main():
             config['freeze_1d'] = args.freeze_1d
             model = staged_training(args.variant, config, device, data_roots)
         else:
-            model = train_variant(args.variant, config, device, data_roots)
+            model = train_variant(args.variant, config, device, data_roots, task_id=args.task_id)
 
         if model is not None:
             # 训练完成后自动评估

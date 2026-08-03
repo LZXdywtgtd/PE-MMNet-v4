@@ -9,10 +9,12 @@ PE-MMNet v4 团队协作训练系统
 4. 状态可视化：已完成/可执行/警告/锁定 状态显示
 5. 检查点导入：支持导入队友的 .pt 文件
 6. 自动批量执行：按拓扑排序执行所有可执行任务
+7. 任务日志：记录每个任务的执行情况
 
 使用方法：
     python team_train.py              # 交互式菜单
     python team_train.py --auto      # 自动执行所有可执行任务
+    python team_train.py --auto --force  # 自动执行（包括硬件警告任务）
     python team_train.py --import   # 导入队友检查点
 """
 
@@ -20,21 +22,53 @@ import os
 import sys
 import json
 import shutil
+import socket
+import re
 from pathlib import Path
 from typing import Dict, Set, Optional
+from datetime import datetime
 import torch
 
-# 颜色支持
-# 注意：在 Windows 下使用 colorama 时需要处理 Unicode 编码问题
-try:
-    import sys
-    import io
-    # 设置标准输出为 UTF-8 模式
-    if sys.platform == 'win32':
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+# =============================================================================
+# 颜色支持（增强版）
+# =============================================================================
 
-    from colorama import init, Fore, Style
-    init(autoreset=True, strip=False)
+def get_color_support():
+    """检测终端颜色支持"""
+    # 1. 检查 NO_COLOR 环境变量
+    if os.environ.get('NO_COLOR'):
+        return 'none'
+
+    # 2. 检查 colorama
+    try:
+        import io
+        if sys.platform == 'win32':
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        from colorama import init, Fore, Style
+        init(autoreset=True, strip=False)
+        return 'colorama'
+    except ImportError:
+        pass
+
+    # 3. 检测 ANSI 支持（Windows 10+）
+    if sys.platform == 'win32':
+        try:
+            version = sys.getwindowsversion()
+            if version.major >= 10:
+                return 'ansi'
+        except:
+            pass
+
+    # 4. 检测 TERM
+    term = os.environ.get('TERM', '')
+    if 'xterm' in term or 'screen' in term or term == 'ANSI':
+        return 'ansi'
+
+    return 'none'
+
+color_mode = get_color_support()
+if color_mode == 'colorama':
+    from colorama import Fore, Style
     COLORS = {
         'green': Fore.GREEN,
         'blue': Fore.BLUE,
@@ -44,8 +78,7 @@ try:
         'bold': Style.BRIGHT,
         'reset': Style.RESET_ALL,
     }
-except ImportError:
-    # 回退：使用 ANSI 转义码
+elif color_mode == 'ansi':
     COLORS = {
         'green': '\033[92m',
         'blue': '\033[94m',
@@ -55,15 +88,50 @@ except ImportError:
         'bold': '\033[1m',
         'reset': '\033[0m',
     }
+else:
+    # 无颜色模式
+    COLORS = {k: '' for k in ['green', 'blue', 'yellow', 'gray', 'red', 'bold', 'reset']}
 
 # 路径配置
 SCRIPT_DIR = Path(__file__).parent
 TASKS_DIR = SCRIPT_DIR / 'tasks'
 CHECKPOINT_DIR = SCRIPT_DIR / 'checkpoints'
+LOG_DIR = SCRIPT_DIR / 'logs'
 RUN_TRAIN = SCRIPT_DIR / 'run_train.py'
 
 # 全局任务字典
 all_tasks: Dict = {}
+
+# =============================================================================
+# 任务执行日志
+# =============================================================================
+
+def log_task_execution(task_id, status, duration_seconds=None, error=None):
+    """记录任务执行日志
+
+    Args:
+        task_id: 任务ID
+        status: 'started', 'completed', 'failed', 'skipped'
+        duration_seconds: 执行时长（秒）
+        error: 错误信息
+    """
+    LOG_DIR.mkdir(exist_ok=True)
+    log_file = LOG_DIR / 'team_training.log'
+
+    log_entry = {
+        'timestamp': datetime.now().isoformat(),
+        'task_id': task_id,
+        'status': status,
+        'duration_seconds': duration_seconds,
+        'error': str(error) if error else None,
+        'hostname': socket.gethostname(),
+    }
+
+    try:
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+    except Exception as e:
+        print(f"[警告] 写入日志失败: {e}")
 
 # =============================================================================
 # 内置默认任务
@@ -188,24 +256,61 @@ def get_completed_tasks():
 
         # 方法1: 从元数据读取 task_id（优先）
         try:
-            checkpoint = torch.load(ckpt_file, map_location='cpu')
+            checkpoint = torch.load(ckpt_file, map_location='cpu', weights_only=False)
             if isinstance(checkpoint, dict) and 'task_id' in checkpoint:
                 task_id = checkpoint['task_id']
-        except:
+        except Exception as e:
             pass
 
-        # 方法2: 从文件名解析（备用）
+        # 方法2: 从文件名解析（增强版）
         if task_id is None:
-            filename = ckpt_file.stem
-            for task_id_candidate in all_tasks.keys():
-                if task_id_candidate in filename:
-                    task_id = task_id_candidate
-                    break
+            task_id = parse_task_id_from_filename(ckpt_file.name, all_tasks)
 
         if task_id and task_id in all_tasks:
             completed.add(task_id)
 
     return completed
+
+
+def parse_task_id_from_filename(filename, all_tasks):
+    """从文件名中解析 task_id（增强版）
+
+    支持格式：
+    - checkpoint_BASELINE_1_best.pt  → BASELINE_1
+    - BASELINE_1_model_best.pt        → BASELINE_1
+    - model_BASELINE_1_best.pt        → BASELINE_1
+    - resnet18_BASELINE_1_best.pt     → BASELINE_1
+
+    Args:
+        filename: 检查点文件名
+        all_tasks: 所有任务的字典
+
+    Returns:
+        task_id 或 None
+    """
+    stem = Path(filename).stem  # 去掉扩展名
+
+    # 方法1: 使用正则表达式精确提取
+    # 查找 TASK_ID 格式：字母+下划线+数字/字母组合
+    patterns = [
+        r'([A-Z][A-Z0-9]*_\d+)',      # BASELINE_1, OPT_GATED_1
+        r'([A-Z]+)_\d+',               # BASELINE, OPT (后面跟数字)
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, stem)
+        if match:
+            candidate = match.group(1)
+            if candidate in all_tasks:
+                return candidate
+
+    # 方法2: 子字符串匹配（作为备用）
+    for task_id in all_tasks:
+        # 使用单词边界匹配，避免误匹配
+        if task_id in stem:
+            return task_id
+
+    return None
 
 
 def check_deps_satisfied(task_id: str, completed: Set[str]) -> bool:
@@ -298,9 +403,11 @@ def run_training_task(task_id: str) -> bool:
     print(f"开始训练: {COLORS['bold']}{task['name']}{COLORS['reset']}")
     print(f"描述: {task['desc']}")
     print(f"预计时间: {task['time']}")
+    print(f"任务ID: {task_id}")
     print(f"{'=' * 60}\n")
 
-    cmd = f'py "{RUN_TRAIN}" --mode train {task["args"]}'
+    # 添加 --task_id 参数以便检查点记录任务ID
+    cmd = f'py "{RUN_TRAIN}" --mode train {task["args"]} --task_id {task_id}'
     print(f"执行命令: {cmd}\n")
 
     result = os.system(cmd)
@@ -313,8 +420,12 @@ def run_training_task(task_id: str) -> bool:
         return False
 
 
-def auto_run_executable():
-    """自动执行所有可执行任务"""
+def auto_run_executable(force_warnings=False):
+    """自动执行所有可执行任务
+
+    Args:
+        force_warnings: 是否强制执行警告任务（硬件可能不足）
+    """
     completed = get_completed_tasks()
     hardware_level, _ = get_hardware_level()
 
@@ -329,36 +440,53 @@ def auto_run_executable():
         print(f"\n{COLORS['yellow']}[信息]{COLORS['reset']} 没有可执行的任务")
         return
 
-    print(f"\n{COLORS['bold']}自动执行模式{COLORS['reset']}")
+    mode_str = "强制" if force_warnings else "标准"
+    print(f"\n{COLORS['bold']}自动执行模式 ({mode_str}){COLORS['reset']}")
     print(f"找到 {len(executable)} 个可执行任务\n")
 
     success_count = 0
     fail_count = 0
+    skip_count = 0
 
     for i, (task_id, status) in enumerate(executable, 1):
         task = all_tasks[task_id]
 
-        # 警告任务需要确认
+        # 警告任务处理
         if status == 'warning':
-            print(f"\n{COLORS['yellow']}[警告]{COLORS['reset']} 任务 {task['name']} 需要更多显存")
-            confirm = input("是否继续? (y/n): ").strip().lower()
-            if confirm != 'y':
-                print(f"跳过 {task['name']}")
-                continue
+            if not force_warnings:
+                print(f"\n{COLORS['yellow']}[警告]{COLORS['reset']} 任务 {task['name']} 需要更多显存")
+                confirm = input("是否继续? (y/n): ").strip().lower()
+                if confirm != 'y':
+                    print(f"跳过 {task['name']}")
+                    log_task_execution(task_id, 'skipped', error='用户取消')
+                    skip_count += 1
+                    continue
+            else:
+                print(f"\n{COLORS['yellow']}[强制执行]{COLORS['reset']} {task['name']} (显存可能不足)")
 
         print(f"\n[{i}/{len(executable)}] 执行: {task['name']}")
 
+        # 记录任务开始
+        log_task_execution(task_id, 'started')
+        task_start = datetime.now()
+
         if run_training_task(task_id):
             success_count += 1
+            duration = (datetime.now() - task_start).total_seconds()
+            log_task_execution(task_id, 'completed', duration_seconds=duration)
         else:
             fail_count += 1
-            retry = input("\n训练失败，是否继续下一个任务? (y/n): ").strip().lower()
-            if retry != 'y':
-                break
+            duration = (datetime.now() - task_start).total_seconds()
+            log_task_execution(task_id, 'failed', duration_seconds=duration)
+            if not force_warnings:
+                retry = input("\n训练失败，是否继续下一个任务? (y/n): ").strip().lower()
+                if retry != 'y':
+                    break
 
     print(f"\n{'=' * 60}")
     print(f"自动执行完成: {COLORS['green']}{success_count} 成功{COLORS['reset']}, "
-          f"{COLORS['red']}{fail_count} 失败{COLORS['reset']}")
+          f"{COLORS['red']}{fail_count} 失败{COLORS['reset']}, "
+          f"{COLORS['gray']}{skip_count} 跳过{COLORS['reset']}")
     print(f"{'=' * 60}")
 
 
@@ -469,6 +597,15 @@ def print_menu(completed: Set[str], hardware_level: str):
 def main():
     global all_tasks
 
+    import argparse
+
+    # 命令行参数解析
+    parser = argparse.ArgumentParser(description='PE-MMNet v4 团队协作训练系统')
+    parser.add_argument('--auto', action='store_true', help='自动执行所有可执行任务')
+    parser.add_argument('--force', action='store_true', help='强制执行硬件警告任务（auto模式）')
+    parser.add_argument('--import', dest='import_mode', action='store_true', help='导入队友检查点')
+    args = parser.parse_args()
+
     # 加载任务配置
     external_tasks = load_tasks_from_files()
     all_tasks = merge_tasks(external_tasks, DEFAULT_TRAIN_TASKS)
@@ -483,6 +620,16 @@ def main():
     else:
         print(f"{COLORS['yellow']}[信息]{COLORS['reset']} 使用内置默认任务列表")
 
+    # 命令行模式处理
+    if args.auto:
+        auto_run_executable(force_warnings=args.force)
+        return
+
+    if args.import_mode:
+        import_checkpoint()
+        return
+
+    # 交互式菜单模式
     while True:
         completed = get_completed_tasks()
         task_index = print_menu(completed, hardware_level)

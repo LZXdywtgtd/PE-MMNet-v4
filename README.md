@@ -48,8 +48,14 @@ python team_train.py
 - 可导入队友的检查点文件
 - 支持自动批量执行
 
-**外部配置**：
-将 `tasks/` 文件夹发给组员，组员放入项目目录即可自动加载任务。
+**自动执行模式**：
+```bash
+# 自动执行所有可执行任务
+python team_train.py --auto
+
+# 强制执行（包括硬件警告任务）
+python team_train.py --auto --force
+```
 
 **交互式菜单**：
 ```bash
@@ -65,31 +71,29 @@ python run_train.py --mode train --epochs 100
 
 ## 模型变体
 
-| 变体 | 说明 | 适用场景 | 性能等级 |
-|------|------|----------|----------|
-| `resnet18` | ResNet18 + CrossAttn（默认） | 标准检测 | L1 |
-| `swin_yolo` | Swin-Tiny + YOLO-FPN | 空间定位 | L1+ |
-| `vit_yolo` | ViT-Small + YOLO-FPN | 全局注意力 | L1 |
-| `detr` | ResNet-18 + Transformer | 全局感知 | L1+ |
-
-> **性能等级说明**：L1 ~12小时, L1+ ~12-13小时, L2 ~14小时, L2+ ~16小时, L3 ~24小时 (150 epochs)
+| 变体 | 说明 | 适用场景 | 显存 |
+|------|------|----------|------|
+| `resnet18` | ResNet18 + CrossAttn（默认） | 标准检测 | ~2GB |
+| `swin_yolo` | Swin-Tiny + YOLO-FPN | 空间定位 | ~4GB |
+| `vit_yolo` | ViT-Small + YOLO-FPN | 全局注意力 | ~3GB |
+| `detr` | ResNet-18 + Transformer | 全局感知 | ~5GB |
 
 ### 训练示例
 
 ```bash
-# 基础模型（推荐快速验证）
-python run_train.py --variant resnet18 --epochs 100
+# 基础模型
+python run_train.py --variant resnet18 --epochs 150
 
 # YOLO系列
-python run_train.py --variant swin_yolo --epochs 100
-python run_train.py --variant vit_yolo --epochs 100
-python run_train.py --variant detr --epochs 100
+python run_train.py --variant swin_yolo --epochs 150 --lr 1e-4
+python run_train.py --variant vit_yolo --epochs 150 --lr 1e-4
+python run_train.py --variant detr --epochs 150 --lr 1e-4
 
 # 优化组合
-python run_train.py --variant swin_yolo --fusion gated --use_coord_attn --epochs 100
+python run_train.py --variant swin_yolo --fusion gated --use_coord_attn --epochs 150
 
 # 分阶段训练
-python run_train.py --variant resnet18 --staged_train --epochs 100
+python run_train.py --variant resnet18 --staged_train --epochs 150
 ```
 
 ---
@@ -106,19 +110,37 @@ python run_train.py --variant resnet18 --staged_train --epochs 100
 
 ---
 
+## 实时 ETA 显示
+
+训练过程中每10轮显示训练进度盒子和预估完成时间：
+
+```
+╔════════════════════════════════════════════════════════════════╗
+║ Epoch 15/150 | Best: 12 | Progress: [████████░░░░░░░░] 10%  ║
+╠════════════════════════════════════════════════════════════════╣
+║ Train | Loss: 0.4562 | LR: 3.00e-04 | Time: 1.3s          ║
+╠════════════════════════════════════════════════════════════════╣
+║ System| EMA: 1.3s/epoch | ETA: 2m55s | 完成: 14:32 ±0.2s   ║
+╚════════════════════════════════════════════════════════════════╝
+```
+
+---
+
 ## 目录结构
 
 ```
 project_v4/
 ├── run_train.py           # 统一训练入口
 ├── train_launcher.py      # 交互式启动器
-├── team_train.py          # 团队协作脚本（配置驱动）
+├── team_train.py          # 团队协作脚本
 ├── config.json            # 数据路径配置
-├── tasks/                # 任务配置目录（协调者分发）
+├── tasks/                # 任务配置目录
 │   ├── team_baseline.json
 │   ├── team_optimization.json
 │   └── batch_ablation.json
 ├── checkpoints/           # 检查点目录
+├── logs/                  # 训练日志目录
+│   └── team_training.log # 团队任务执行日志
 │
 ├── data/                  # 数据加载
 │   └── dataset_multimodal.py
@@ -136,11 +158,8 @@ project_v4/
 │
 └── docs/                 # 文档
     ├── 快速配置指南.md
-    ├── 架构设计文档.md
-    ├── 调参与算法工程指导文档.md
-    ├── 项目算法与训练实验设计报告.md
-    ├── 控制台输出样式.md
-    └── 团队协作训练指南.md
+    ├── 团队协作训练指南.md
+    └── 开发人员文档.md
 ```
 
 ---
@@ -161,10 +180,7 @@ project_v4/
 | 文档 | 内容 |
 |------|------|
 | [快速配置指南](docs/快速配置指南.md) | 环境配置、首次使用 |
-| [控制台输出样式](docs/控制台输出样式.md) | 训练输出颜色说明 |
-| [架构设计文档](docs/架构设计文档.md) | 模块关系、数据流 |
-| [调参指南](docs/调参与算法工程指导文档.md) | 损失权重、调参建议 |
-| [算法报告](docs/项目算法与训练实验设计报告.md) | 算法原理 |
+| [团队协作训练指南](docs/团队协作训练指南.md) | team_train.py 使用 |
 | [开发人员文档](开发人员文档.md) | 代码规范、模块详解 |
 | [API文档](api.md) | 接口参考 |
 
@@ -175,6 +191,8 @@ project_v4/
 当前版本：v4.6.0 (2026-08-03)
 
 主要更新：
-- 配置驱动的团队任务分发系统
-- 模型变体命名规范化
-- 训练输出升级（每10轮显示盒子汇总）
+- 动态训练时间估算（训练前测量2轮）
+- 实时 ETA 显示（EMA + 置信区间 + 预计完成时间）
+- 检查点元数据保存 task_id
+- 团队任务执行日志
+- `--force` 参数强制执行硬件警告任务
