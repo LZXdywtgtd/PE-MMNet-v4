@@ -1,0 +1,6 @@
+{
+  "id": "BATCH_ABLATION",
+  "name": "YOLO系列消融实验",
+  "desc": "vit_yolo + swin_yolo + detr 三合一",
+  "tasks": ["BASELINE_2", "BASELINE_3", "BASELINE_4"]
+}

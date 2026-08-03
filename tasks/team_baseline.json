@@ -1,0 +1,42 @@
+[
+  {
+    "id": "BASELINE_1",
+    "name": "ResNet18基线",
+    "desc": "轻量骨干，适合快速验证",
+    "args": "--variant resnet18 --epochs 150",
+    "level": "L1",
+    "time": "~12小时",
+    "gpu_mem": "~2GB",
+    "deps": []
+  },
+  {
+    "id": "BASELINE_2",
+    "name": "Swin-YOLO基线",
+    "desc": "推荐！网格回归，适合空间定位",
+    "args": "--variant swin_yolo --epochs 150 --lr 1e-4",
+    "level": "L1+",
+    "time": "~12-13小时",
+    "gpu_mem": "~4GB",
+    "deps": []
+  },
+  {
+    "id": "BASELINE_3",
+    "name": "ViT-YOLO基线",
+    "desc": "ViT风格注意力",
+    "args": "--variant vit_yolo --epochs 150 --lr 1e-4",
+    "level": "L1",
+    "time": "~12小时",
+    "gpu_mem": "~3GB",
+    "deps": []
+  },
+  {
+    "id": "BASELINE_4",
+    "name": "DETR基线",
+    "desc": "Transformer风格，全局上下文感知",
+    "args": "--variant detr --epochs 150 --lr 1e-4",
+    "level": "L1+",
+    "time": "~13-14小时",
+    "gpu_mem": "~5GB",
+    "deps": []
+  }
+]

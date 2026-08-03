@@ -1,0 +1,32 @@
+[
+  {
+    "id": "OPT_GATED",
+    "name": "门控融合优化",
+    "desc": "基于ResNet18测试门控融合",
+    "args": "--variant resnet18 --fusion gated --epochs 150",
+    "level": "L2",
+    "time": "~14小时",
+    "gpu_mem": "~2GB",
+    "deps": ["BASELINE_1"]
+  },
+  {
+    "id": "OPT_COORD",
+    "name": "坐标注意力优化",
+    "desc": "基于Swin-YOLO测试坐标注意力",
+    "args": "--variant swin_yolo --use_coord_attn --epochs 150",
+    "level": "L2",
+    "time": "~14小时",
+    "gpu_mem": "~4GB",
+    "deps": ["BASELINE_2"]
+  },
+  {
+    "id": "OPT_STAGED",
+    "name": "分阶段训练",
+    "desc": "先短序列预训练，再长序列微调",
+    "args": "--variant resnet18 --staged_train --epochs 150",
+    "level": "L2+",
+    "time": "~16小时",
+    "gpu_mem": "~2GB",
+    "deps": ["BASELINE_1"]
+  }
+]
