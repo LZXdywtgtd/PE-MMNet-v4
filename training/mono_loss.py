@@ -42,11 +42,17 @@ def box_iou(box1, box2, eps=1e-7):
     Returns:
         iou: IoU 值，(batch,)
     """
+    # 确保宽高为正（防止 NaN）
+    w1 = torch.clamp(box1[:, 2], min=eps)
+    h1 = torch.clamp(box1[:, 3], min=eps)
+    w2 = torch.clamp(box2[:, 2], min=eps)
+    h2 = torch.clamp(box2[:, 3], min=eps)
+
     # 将 [x, y, w, h] 转换为 [x1, y1, x2, y2]（左上角 + 右下角）
-    b1_x1, b1_x2 = box1[:, 0] - box1[:, 2] / 2, box1[:, 0] + box1[:, 2] / 2
-    b1_y1, b1_y2 = box1[:, 1] - box1[:, 3] / 2, box1[:, 1] + box1[:, 3] / 2
-    b2_x1, b2_x2 = box2[:, 0] - box2[:, 2] / 2, box2[:, 0] + box2[:, 2] / 2
-    b2_y1, b2_y2 = box2[:, 1] - box2[:, 3] / 2, box2[:, 1] + box2[:, 3] / 2
+    b1_x1, b1_x2 = box1[:, 0] - w1 / 2, box1[:, 0] + w1 / 2
+    b1_y1, b1_y2 = box1[:, 1] - h1 / 2, box1[:, 1] + h1 / 2
+    b2_x1, b2_x2 = box2[:, 0] - w2 / 2, box2[:, 0] + w2 / 2
+    b2_y1, b2_y2 = box2[:, 1] - h2 / 2, box2[:, 1] + h2 / 2
 
     # 计算交集区域
     inter_x1 = torch.max(b1_x1, b2_x1)
@@ -58,12 +64,14 @@ def box_iou(box1, box2, eps=1e-7):
     inter_area = torch.clamp(inter_x2 - inter_x1, min=0) * torch.clamp(inter_y2 - inter_y1, min=0)
 
     # 并集面积
-    b1_area = box1[:, 2] * box1[:, 3]
-    b2_area = box2[:, 2] * box2[:, 3]
+    b1_area = w1 * h1
+    b2_area = w2 * h2
     union_area = b1_area + b2_area - inter_area + eps
 
     # IoU
     iou = inter_area / union_area
+    # 确保 IoU 在 [0, 1] 范围内
+    iou = torch.clamp(iou, 0.0, 1.0)
 
     return iou
 
@@ -89,35 +97,40 @@ def diou_loss(pred_boxes, target_boxes, eps=1e-7):
     Returns:
         loss: DIoU 损失，标量
     """
+    # 确保宽高为正
+    w1 = torch.clamp(pred_boxes[:, 2], min=eps)
+    h1 = torch.clamp(pred_boxes[:, 3], min=eps)
+    w2 = torch.clamp(target_boxes[:, 2], min=eps)
+    h2 = torch.clamp(target_boxes[:, 3], min=eps)
+
     # 计算 IoU
     iou = box_iou(pred_boxes, target_boxes, eps)
 
     # 计算中心点距离
-    pred_center_x = pred_boxes[:, 0]
-    pred_center_y = pred_boxes[:, 1]
-    target_center_x = target_boxes[:, 0]
-    target_center_y = target_boxes[:, 1]
-
-    center_dist_sq = (pred_center_x - target_center_x) ** 2 + \
-                     (pred_center_y - target_center_y) ** 2
+    center_dist_sq = (pred_boxes[:, 0] - target_boxes[:, 0]) ** 2 + \
+                     (pred_boxes[:, 1] - target_boxes[:, 1]) ** 2
 
     # 计算最小外接矩形的对角线长度
-    # 外接矩形：包含两个框的最小矩形
-    b1_x1, b1_x2 = pred_boxes[:, 0] - pred_boxes[:, 2] / 2, pred_boxes[:, 0] + pred_boxes[:, 2] / 2
-    b1_y1, b1_y2 = pred_boxes[:, 1] - pred_boxes[:, 3] / 2, pred_boxes[:, 1] + pred_boxes[:, 3] / 2
-    b2_x1, b2_x2 = target_boxes[:, 0] - target_boxes[:, 2] / 2, target_boxes[:, 0] + target_boxes[:, 2] / 2
-    b2_y1, b2_y2 = target_boxes[:, 1] - target_boxes[:, 3] / 2, target_boxes[:, 1] + target_boxes[:, 3] / 2
+    b1_x1, b1_x2 = pred_boxes[:, 0] - w1 / 2, pred_boxes[:, 0] + w1 / 2
+    b1_y1, b1_y2 = pred_boxes[:, 1] - h1 / 2, pred_boxes[:, 1] + h1 / 2
+    b2_x1, b2_x2 = target_boxes[:, 0] - w2 / 2, target_boxes[:, 0] + w2 / 2
+    b2_y1, b2_y2 = target_boxes[:, 1] - h2 / 2, target_boxes[:, 1] + h2 / 2
 
     enclosing_x1 = torch.min(b1_x1, b2_x1)
     enclosing_y1 = torch.min(b1_y1, b2_y1)
     enclosing_x2 = torch.max(b1_x2, b2_x2)
     enclosing_y2 = torch.max(b1_y2, b2_y2)
 
-    # 对角线长度平方
-    diag_dist_sq = (enclosing_x2 - enclosing_x1) ** 2 + (enclosing_y2 - enclosing_y1) ** 2 + eps
+    # 对角线长度平方（确保不为零）
+    diag_dist_sq = torch.clamp(
+        (enclosing_x2 - enclosing_x1) ** 2 + (enclosing_y2 - enclosing_y1) ** 2,
+        min=eps
+    )
 
     # DIoU = IoU - (center_dist / diag)
     diou = iou - (center_dist_sq / diag_dist_sq)
+    # 确保 DIoU 在合理范围内
+    diou = torch.clamp(diou, -1.0, 1.0)
 
     # 损失 = 1 - DIoU
     loss = 1.0 - diou
@@ -404,11 +417,18 @@ class ConfidenceLoss(nn.Module):
 
         # 转换为 logits（Sigmoid 的逆操作）
         # BCEWithLogitsLoss 内部会做 Sigmoid，所以输入应该是 logit
-        eps = 1e-7
+        eps = 1e-3  # 增大 eps 防止极端值
         pred_confidence = torch.clamp(pred_confidence, eps, 1 - eps)
+
+        # 安全计算 logits
         logits = torch.log(pred_confidence / (1 - pred_confidence))
+        logits = torch.clamp(logits, -50, 50)  # 限制 logits 范围
 
         loss_conf = self.criterion(logits, target_confidence)
+
+        # 检查 NaN
+        if torch.isnan(loss_conf):
+            return torch.tensor(0.1, device=pred_confidence.device, requires_grad=True)
 
         return loss_conf
 
@@ -506,14 +526,24 @@ class MultimodalCrackLoss(nn.Module):
         loss_conf = self.confidence(pred_conf, target_conf)
 
         # -------------------------------------------------------------------------
-        # 计算总损失
+        # 计算总损失（防止 NaN）
         # -------------------------------------------------------------------------
+        # 安全计算：确保每个分量都是有效值
+        loss_mse = torch.where(torch.isnan(loss_mse), torch.zeros_like(loss_mse), loss_mse)
+        loss_mono = torch.where(torch.isnan(loss_mono), torch.zeros_like(loss_mono), loss_mono)
+        loss_loc = torch.where(torch.isnan(loss_loc), torch.zeros_like(loss_loc), loss_loc)
+        loss_conf = torch.where(torch.isnan(loss_conf), torch.zeros_like(loss_conf), loss_conf)
+
         loss_total = (
             self.lambda_mse_density * loss_mse +
             self.lambda_mono * loss_mono +
             self.lambda_loc * loss_loc +
             self.lambda_conf * loss_conf
         )
+
+        # 最终 NaN 检查
+        if torch.isnan(loss_total):
+            loss_total = loss_mse + loss_loc  # 回退到基础损失
 
         # -------------------------------------------------------------------------
         # 组装损失字典

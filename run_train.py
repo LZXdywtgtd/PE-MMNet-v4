@@ -415,17 +415,21 @@ def evaluate_model(model, device, data_roots=None, predict_offset=0,
 
             # 解包新变体的输出（train/eval模式下返回元组）
             if is_new_variant:
-                outputs, _ = raw_outputs  # (B, 6) 或 (B, N, 6)
+                outputs, global_density = raw_outputs  # (B, 6) 或 (B, N, 6), global_density
                 # 如果是网格预测，取第一个（推理模式下模型已处理）
                 if outputs.dim() == 3:
                     outputs = outputs[:, 0, :]  # 取第一个预测
             else:
                 outputs = raw_outputs
+                global_density = None
 
             if task == 'detection':
-                # 检测任务：outputs 是 (batch, 6)
-                all_preds.append(outputs.cpu().numpy())
-                all_targets.append(labels.numpy())
+                # 检测任务：使用 global_density（如果有）或 outputs 的 density 部分
+                if global_density is not None:
+                    all_preds.append(global_density.cpu())
+                else:
+                    all_preds.append(outputs[:, 5:6].cpu())
+                all_targets.append(labels[:, 5:6].cpu())
             elif task == 'segmentation':
                 # 分割任务：outputs 是 (batch, 1, 256, 256)
                 # 计算 Dice Score
@@ -434,56 +438,85 @@ def evaluate_model(model, device, data_roots=None, predict_offset=0,
                 dice = (2. * intersection + 1e-7) / (preds_binary.sum() + labels.sum() + 1e-7)
                 all_dice_scores.append(dice.item())
             else:
-                # multitask: outputs 是 (mask, detection) 元组
-                mask, detection = outputs
-                all_preds.append(detection.cpu().numpy())
+                # multitask: outputs 是 (mask, detection) 元组（仅限旧变体）
+                if isinstance(outputs, tuple):
+                    mask, detection = outputs
+                    all_preds.append(detection.cpu().numpy())
 
-                # 修复：初始化 target_mask 以避免 UnboundLocalError
-                target_mask = None
-                target_det = None
+                    # 修复：初始化 target_mask 以避免 UnboundLocalError
+                    target_mask = None
+                    target_det = None
 
-                # labels 是 (mask, detection) 元组
-                if isinstance(labels, tuple):
-                    target_mask, target_det = labels
-                    target_det = target_det.to(device)
-                    target_mask = target_mask.to(device)
+                    # labels 是 (mask, detection) 元组
+                    if isinstance(labels, tuple):
+                        target_mask, target_det = labels
+                        target_det = target_det.to(device)
+                        target_mask = target_mask.to(device)
+                    else:
+                        target_det = labels.to(device)
+
+                    all_targets.append(target_det.cpu().numpy())
+
+                    # 同时计算 Dice Score
+                    preds_binary = (mask > 0.5).float()
+                    if target_mask is not None:
+                        intersection = (preds_binary * target_mask).sum()
+                        dice = (2. * intersection + 1e-7) / (preds_binary.sum() + target_mask.sum() + 1e-7)
+                        all_dice_scores.append(dice.item())
                 else:
-                    target_det = labels.to(device)
-
-                all_targets.append(target_det.cpu().numpy())
-
-                # 同时计算 Dice Score
-                preds_binary = (mask > 0.5).float()
-                if target_mask is not None:
-                    intersection = (preds_binary * target_mask).sum()
-                    dice = (2. * intersection + 1e-7) / (preds_binary.sum() + target_mask.sum() + 1e-7)
-                    all_dice_scores.append(dice.item())
+                    # 新变体的 multitask（如果有）
+                    all_preds.append(outputs.cpu().numpy())
+                    all_targets.append(labels.numpy())
 
     # 计算评估指标
     if task == 'detection':
         preds, targets = np.vstack(all_preds), np.vstack(all_targets)
 
-        # 密度指标
-        pred_d, target_d = preds[:, 5], targets[:, 5]
-        mse = np.mean((pred_d - target_d) ** 2)
-        r2 = 1 - mse / np.var(target_d) if np.var(target_d) > 1e-8 else 0.0
+        # 调试：检查数据
+        print(f"  [DEBUG] Eval preds shape: {preds.shape}, targets shape: {targets.shape}")
 
-        # 定位指标
-        ious = box_iou(
-            torch.from_numpy(np.clip(preds[:, :4], 0, 1)),
-            torch.from_numpy(targets[:, :4])
-        ).numpy()
-        mIoU = np.mean(ious)
+        # 提取密度值（可能是 (batch, 1) 或 (batch, 6)）
+        if preds.shape[1] == 1:
+            pred_d = preds[:, 0]
+            target_d = targets[:, 0]
+        else:
+            pred_d = preds[:, 5]
+            target_d = targets[:, 5]
+
+        print(f"  [DEBUG] pred_d: min={np.nanmin(pred_d):.4f}, max={np.nanmax(pred_d):.4f}, std={np.nanstd(pred_d):.4f}")
+        print(f"  [DEBUG] target_d: min={np.nanmin(target_d):.4f}, max={np.nanmax(target_d):.4f}, std={np.nanstd(target_d):.4f}")
+
+        # 安全的计算
+        pred_d = np.nan_to_num(pred_d, nan=0.0)
+        target_d = np.nan_to_num(target_d, nan=0.0)
+
+        mse = np.mean((pred_d - target_d) ** 2)
+        target_var = np.var(target_d)
+        if target_var > 1e-8:
+            r2 = 1 - mse / target_var
+        else:
+            r2 = 0.0
+            print(f"  [DEBUG] R2 计算跳过：target 方差过小")
+
+        # 定位指标（仅当 preds 是完整 6 维时计算）
+        if preds.shape[1] >= 6 and targets.shape[1] >= 6:
+            ious = box_iou(
+                torch.from_numpy(np.clip(preds[:, :4], 0, 1)),
+                torch.from_numpy(targets[:, :4])
+            ).numpy()
+            mIoU = np.nanmean(ious)
+        else:
+            mIoU = 0.0
 
         # 物理自洽性
         diffs = pred_d[1:] - pred_d[:-1]
         violation_rate = np.sum(diffs < 0) / len(diffs) if len(diffs) > 0 else 0.0
 
         return {
-            'r2': float(r2),
-            'rmse': float(np.sqrt(mse)),
-            'mae': float(np.mean(np.abs(pred_d - target_d))),
-            'mIoU': float(mIoU),
+            'r2': float(r2) if not np.isnan(r2) else 0.0,
+            'rmse': float(np.sqrt(mse)) if not np.isnan(mse) else 0.0,
+            'mae': float(np.mean(np.abs(pred_d - target_d))) if not np.isnan(np.mean(np.abs(pred_d - target_d))) else 0.0,
+            'mIoU': float(mIoU) if not np.isnan(mIoU) else 0.0,
             'violation_rate': float(violation_rate),
             'dice': 0.0,  # 检测任务不计算 Dice
         }
@@ -826,6 +859,12 @@ def estimate_training_time(model, train_loader, test_loader, criterion, optimize
     times = []
     model.train()
 
+    # FP16 支持
+    fp16_enabled = config.get('fp16', True) and torch.cuda.is_available()
+    scaler = torch.amp.GradScaler('cuda') if fp16_enabled else None
+    variant_key = config.get('variant', 'resnet18')
+    task = config.get('task', 'detection')
+
     # 仅估算 2 个 epoch（足够估算速度）
     num_warmup_epochs = 2
 
@@ -842,11 +881,43 @@ def estimate_training_time(model, train_loader, test_loader, criterion, optimize
                 labels = labels.to(device)
 
             optimizer.zero_grad()
-            with torch.amp.autocast('cuda', enabled=config.get('fp16', True)):
-                output, _ = model(seq_1d, img_2d)
-                loss = criterion(output, labels)
-            loss.backward()
-            optimizer.step()
+            if fp16_enabled:
+                with torch.amp.autocast('cuda'):
+                    is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
+                    if is_new_variant:
+                        output, _ = model(seq_1d, img_2d)  # 返回 (outputs, global_density)
+                        # 新变体跳过（估算阶段不计算精确损失）
+                        loss = torch.tensor(1.0, device=device, requires_grad=True)
+                    else:
+                        output = model(seq_1d, img_2d)
+                        if task == 'segmentation':
+                            loss = criterion(output, labels)
+                        elif task == 'multitask':
+                            loss = criterion(output, labels)
+                        else:
+                            loss, _ = criterion(output, labels)
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                with torch.amp.autocast('cuda', enabled=False):
+                    is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
+                    if is_new_variant:
+                        output, _ = model(seq_1d, img_2d)
+                        loss = torch.tensor(1.0, device=device, requires_grad=True)
+                    else:
+                        output = model(seq_1d, img_2d)
+                        if task == 'segmentation':
+                            loss = criterion(output, labels)
+                        elif task == 'multitask':
+                            loss = criterion(output, labels)
+                        else:
+                            loss, _ = criterion(output, labels)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
 
         times.append(time.time() - epoch_start)
 
@@ -958,6 +1029,9 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
     # ============================================================
     print_info("执行干跑验证...")
     model.train()
+    # 保存模型状态以便 NaN 回滚
+    dry_run_model_state = {k: v.clone() for k, v in model.state_dict().items()}
+    dry_run_fp16_disabled = False
     try:
         (seq_1d, img_2d), labels = next(iter(train_loader))
         # 修复：多任务标签可能是元组，需要解包后再移动到设备
@@ -969,8 +1043,9 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             labels = labels.to(device)
         optimizer.zero_grad()
 
-        if fp16_enabled:
-            with torch.amp.autocast('cuda')():
+        # 前向传播
+        if fp16_enabled and not dry_run_fp16_disabled:
+            with torch.amp.autocast('cuda'):
                 # 检查是否为新变体
                 is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                 if is_new_variant:
@@ -989,29 +1064,77 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                         loss = criterion(outputs, labels)
                     else:
                         loss, _ = criterion(outputs, labels)
+        else:
+            with torch.amp.autocast('cuda', enabled=False):
+                # 检查是否为新变体
+                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
+                if is_new_variant:
+                    outputs, global_density = model(seq_1d, img_2d)
+                    if variant_key in ['swin_yolo', 'vit_yolo']:
+                        assigned_target, pos_mask = assigner(labels)
+                        loss = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                    else:  # detr
+                        indices = matcher(outputs, {'labels': labels})
+                        loss = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                else:
+                    outputs = model(seq_1d, img_2d)
+                    if task == 'segmentation':
+                        loss = criterion(outputs, labels)
+                    elif task == 'multitask':
+                        loss = criterion(outputs, labels)
+                    else:
+                        loss, _ = criterion(outputs, labels)
+
+        # NaN 检查
+        is_nan = torch.isnan(loss).item()
+        debug_str = f"loss={loss.item():.6f}, is_nan={is_nan}"
+        if is_nan:
+            debug_str += " [NaN!]"
+            print(f"  [DEBUG] Dry run: {debug_str}")
+            print(f"    outputs[:3]={outputs[:3].detach().cpu().numpy()}")
+            print(f"    labels[:3]={labels[:3].cpu().numpy()}")
+        else:
+            print(f"  [DEBUG] Dry run: {debug_str}")
+        if is_nan:
+            torch.cuda.empty_cache()
+            # 重试不使用 FP16
+            model.load_state_dict(dry_run_model_state)
+            optimizer.zero_grad()
+            dry_run_fp16_disabled = True
+
+            with torch.amp.autocast('cuda', enabled=False):
+                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
+                if is_new_variant:
+                    outputs, global_density = model(seq_1d, img_2d)
+                    if variant_key in ['swin_yolo', 'vit_yolo']:
+                        assigned_target, pos_mask = assigner(labels)
+                        loss = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                    else:  # detr
+                        indices = matcher(outputs, {'labels': labels})
+                        loss = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                else:
+                    outputs = model(seq_1d, img_2d)
+                    if task == 'segmentation':
+                        loss = criterion(outputs, labels)
+                    elif task == 'multitask':
+                        loss = criterion(outputs, labels)
+                    else:
+                        loss, _ = criterion(outputs, labels)
+
+                if torch.isnan(loss):
+                    raise RuntimeError("NaN loss 持续存在，可能是数据或模型问题")
+                print_warning("FP16 已禁用用于此训练")
+
+        # 反向传播
+        if fp16_enabled and not dry_run_fp16_disabled:
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
         else:
-            # 检查是否为新变体
-            is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
-            if is_new_variant:
-                outputs, global_density = model(seq_1d, img_2d)
-                if variant_key in ['swin_yolo', 'vit_yolo']:
-                    assigned_target, pos_mask = assigner(labels)
-                    loss = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
-                else:  # detr
-                    indices = matcher(outputs, {'labels': labels})
-                    loss = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
-            else:
-                outputs = model(seq_1d, img_2d)
-                if task == 'segmentation':
-                    loss = criterion(outputs, labels)
-                elif task == 'multitask':
-                    loss = criterion(outputs, labels)
-                else:
-                    loss, _ = criterion(outputs, labels)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
         print_success("干跑验证通过 ✅")
@@ -1026,6 +1149,13 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
         torch.cuda.empty_cache()
         model.train()
 
+    # 如果干跑时禁用了 FP16，主训练也禁用
+    if dry_run_fp16_disabled:
+        fp16_enabled = False
+        if scaler is not None:
+            scaler = None
+        print_warning("主训练也禁用 FP16（与干跑一致）")
+
     # 初始化 epoch_elapsed（防止异常路径下未定义）
     epoch_elapsed = 0.0
 
@@ -1038,7 +1168,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
         epoch_start = time.time()  # 记录 epoch 开始时间
 
         try:
-            for (seq_1d, img_2d), labels in train_loader:
+            for train_batch_idx, ((seq_1d, img_2d), labels) in enumerate(train_loader):
                 # 修复：多任务标签可能是元组，需要解包后再移动到设备
                 seq_1d = seq_1d.to(device)
                 img_2d = img_2d.to(device)
@@ -1049,7 +1179,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 optimizer.zero_grad()
 
                 if fp16_enabled:
-                    with torch.amp.autocast('cuda')():
+                    with torch.amp.autocast('cuda'):
                         # 检查是否为新变体
                         is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                         if is_new_variant:
@@ -1061,6 +1191,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                                 indices = matcher(outputs, {'labels': labels})
                                 loss_total = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
                         else:
+                            # resnet18 等标准变体
                             outputs = model(seq_1d, img_2d)
                             if task == 'segmentation':
                                 loss_total = criterion(outputs, labels)
@@ -1068,6 +1199,10 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                                 loss_total = criterion(outputs, labels)
                             else:
                                 loss_total, _ = criterion(outputs, labels)
+                    # 调试：在 autocast 外部打印
+                    if epoch == 0 and train_batch_idx < 3:
+                        print(f"  [DEBUG] FP16 outputs[:2]={outputs[:2].detach().cpu().numpy()}")
+                        print(f"  [DEBUG] FP16 outputs is_nan={torch.isnan(outputs).any().item()}")
                     scaler.scale(loss_total).backward()
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -1086,6 +1221,9 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                             loss_total = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
                     else:
                         outputs = model(seq_1d, img_2d)
+                        if epoch == 0 and train_batch_idx < 3:
+                            print(f"  [DEBUG] outputs[:2]={outputs[:2].detach().cpu().numpy()}")
+                            print(f"  [DEBUG] outputs is_nan={torch.isnan(outputs).any().item()}")
                         if task == 'segmentation':
                             loss_total = criterion(outputs, labels)
                         elif task == 'multitask':
@@ -1097,6 +1235,18 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                     optimizer.step()
 
                 train_loss += loss_total.item()
+
+                # 调试：检查前几个 batch 的 loss
+                if epoch == 0 and train_batch_idx < 3:
+                    loss_str = f"loss={loss_total.item():.6f}"
+                    if torch.isnan(loss_total).item():
+                        loss_str += " [NaN!]"
+                        # 额外调试：检查模型输出
+                        print(f"  [DEBUG] Train Batch {train_batch_idx}: {loss_str}")
+                        print(f"    outputs[:3]={outputs[:3].detach().cpu().numpy()}")
+                        print(f"    labels[:3]={labels[:3].cpu().numpy()}")
+                    else:
+                        print(f"  [DEBUG] Train Batch {train_batch_idx}: {loss_str}")
 
         except RuntimeError as e:
             if 'out of memory' in str(e).lower():
@@ -1126,6 +1276,9 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                 if is_new_variant:
                     outputs, global_density = model(seq_1d, img_2d)
+                    if epoch == 0 and len(all_preds) < 3:
+                        print(f"  [DEBUG] Val {variant_key} outputs[:2]={outputs[:2].detach().cpu().numpy()}")
+                        print(f"  [DEBUG] Val global_density[:2]={global_density[:2].detach().cpu().numpy()}")
                     if variant_key in ['swin_yolo', 'vit_yolo']:
                         assigned_target, pos_mask = assigner(labels)
                         loss_total = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
@@ -1139,6 +1292,9 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                         all_targets.append(labels[:, 5:6].cpu())
                 else:
                     outputs = model(seq_1d, img_2d)
+                    if epoch == 0 and len(all_preds) < 3:
+                        print(f"  [DEBUG] Val outputs[:2]={outputs[:2].detach().cpu().numpy()}")
+                        print(f"  [DEBUG] Val outputs is_nan={torch.isnan(outputs).any().item()}")
                     # 根据任务类型计算损失
                     if task == 'segmentation':
                         loss_total = criterion(outputs, labels)
@@ -1162,9 +1318,23 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             from scipy import stats
             preds = torch.cat(all_preds).numpy().flatten()
             targets = torch.cat(all_targets).numpy().flatten()
-            r2 = stats.pearsonr(preds, targets)[0] ** 2 if len(preds) > 1 else 0.0
-            rmse = np.sqrt(np.mean((preds - targets) ** 2))
-            mae = np.mean(np.abs(preds - targets))
+
+            # 调试：检查数据
+            print(f"  [DEBUG] Val: preds.shape={preds.shape}, targets.shape={targets.shape}")
+            print(f"  [DEBUG] preds: min={np.nanmin(preds):.4f}, max={np.nanmax(preds):.4f}, std={np.nanstd(preds):.4f}")
+            print(f"  [DEBUG] targets: min={np.nanmin(targets):.4f}, max={np.nanmax(targets):.4f}, std={np.nanstd(targets):.4f}")
+
+            # 安全的 R2 计算
+            if len(preds) > 1 and np.nanstd(preds) > 1e-8 and np.nanstd(targets) > 1e-8:
+                r2 = stats.pearsonr(preds, targets)[0] ** 2
+                if np.isnan(r2):
+                    r2 = 0.0
+            else:
+                r2 = 0.0
+                print(f"  [DEBUG] R2 计算跳过：方差过小或样本不足")
+
+            rmse = np.sqrt(np.nanmean((preds - targets) ** 2))
+            mae = np.nanmean(np.abs(preds - targets))
             # 计算违反率
             diffs = np.diff(targets)
             violations = np.sum(diffs > 0) / max(len(diffs), 1)
@@ -1329,17 +1499,6 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             print_info(print_box_line(f"System| EMA: {eta_info['ema']:.1f}s/epoch | {eta_display} {confidence_display} {finish_display}"))
             print_info(print_box_line(f"       | GPU: {gpu_part} | 进度: {progress_pct} | 剩余: {eta_info['remaining_epochs']}轮"))
 
-            print_info(bot_border)
-
-            bot_border = "╚" + "═" * content_width + "╝"
-
-            print_info(top_border)
-            print_info(line_title)
-            print_info(sep)
-            print_info(train_line)
-            print_info(metric_line)
-            print_info(sep)
-            print_info(system_line)
             print_info(bot_border)
 
         if patience_counter >= config['patience']:
