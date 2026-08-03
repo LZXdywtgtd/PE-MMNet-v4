@@ -842,7 +842,7 @@ def estimate_training_time(model, train_loader, test_loader, criterion, optimize
                 labels = labels.to(device)
 
             optimizer.zero_grad()
-            with torch.cuda.amp.autocast(enabled=config.get('fp16', True)):
+            with torch.amp.autocast('cuda', enabled=config.get('fp16', True)):
                 output, _ = model(seq_1d, img_2d)
                 loss = criterion(output, labels)
             loss.backward()
@@ -926,7 +926,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
     )
 
     # FP16 混合精度
-    scaler = torch.cuda.amp.GradScaler() if fp16_enabled else None
+    scaler = torch.amp.GradScaler('cuda') if fp16_enabled else None
 
     best_loss = float('inf')
     patience_counter = 0
@@ -970,7 +970,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
         optimizer.zero_grad()
 
         if fp16_enabled:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda')():
                 # 检查是否为新变体
                 is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                 if is_new_variant:
@@ -1049,7 +1049,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 optimizer.zero_grad()
 
                 if fp16_enabled:
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast('cuda')():
                         # 检查是否为新变体
                         is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                         if is_new_variant:
