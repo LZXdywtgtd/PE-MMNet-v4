@@ -268,7 +268,7 @@ def main():
                         ('--lr', str(cmd.lr)),
                         ('--dropout', str(cmd.dropout)),
                     ]:
-                        if key == '--variant' and value == 'full':
+                        if key == '--variant' and value == 'resnet18':
                             continue  # 跳过默认值
                         args_list.extend([key, value])
                     config_list.append(args_list)

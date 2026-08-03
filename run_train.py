@@ -8,7 +8,7 @@ PE-MMNet v4 统一训练脚本
 
 使用方法：
   # 训练完整模型（检测模式）
-  python run_train.py --mode train --variant full --epochs 150
+  python run_train.py --mode train --variant resnet18 --epochs 150
 
   # 训练分割模型
   python run_train.py --mode train --task segmentation --epochs 100
@@ -340,11 +340,14 @@ VARIANT_MODELS = {
     'concat': ModelConcat,
     'add': ModelAdd,
     'cross_attn': ModelCrossAttn,
-    'full': PETSNetMultimodal,
-    # 新增 YOLO-FPN 和 DETR 变体
-    'swin_yolo_fpn': SwinYOLOFPN,
-    'vit_yolo_fpn': ViTYOLOFPN,
-    'detr_style': DETRStyle,
+    'resnet18': PETSNetMultimodal,
+    # YOLO-FPN 变体
+    'swin_yolo': SwinYOLOFPN,
+    'vit_yolo': ViTYOLOFPN,
+    # DETR 变体
+    'detr': DETRStyle,
+    # PatchTST 变体（需额外实现）
+    # 'swin_patchtst': SwinYOLOFPN + PatchTST,
 }
 
 VARIANT_DISPLAY_NAMES = {
@@ -353,11 +356,14 @@ VARIANT_DISPLAY_NAMES = {
     'concat': '双分支+拼接',
     'add': '双分支+加法',
     'cross_attn': 'Cross-Attention',
-    'full': '完整MM-DBFNet',
-    # 新增变体
-    'swin_yolo_fpn': 'Swin-YOLO-FPN',
-    'vit_yolo_fpn': 'ViT-YOLO-FPN',
-    'detr_style': 'DETR风格',
+    'resnet18': 'ResNet18基线',
+    # YOLO-FPN 变体
+    'swin_yolo': 'Swin-YOLO',
+    'vit_yolo': 'ViT-YOLO',
+    # DETR 变体
+    'detr': 'DETR',
+    # PatchTST 变体
+    # 'swin_patchtst': 'Swin-PatchTST',
 }
 
 
@@ -395,7 +401,7 @@ def evaluate_model(model, device, data_roots=None, predict_offset=0,
     model.eval()
 
     # 判断是否为新变体（返回元组）
-    is_new_variant = variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn', 'detr_style']
+    is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
 
     all_preds, all_targets = [], []
 
@@ -540,10 +546,10 @@ def eval_checkpoint(checkpoint_path, device, image_size=None):
             variant_key = key
             break
     if variant_key is None:
-        variant_key = saved_config.get('variant', 'full')
+        variant_key = saved_config.get('variant', 'resnet18')
 
     # 创建模型
-    if variant_key == 'full':
+    if variant_key == 'resnet18':
         model = PETSNetMultimodal(
             seq_len=300,
             image_channels=2,
@@ -673,7 +679,7 @@ def staged_training(variant_key, config, device, data_roots=None):
         pretrained_2d=True,
         dropout=config['dropout'],
         task=config.get('task', 'detection')
-    ) if variant_key == 'full' else ModelClass(dropout=config['dropout'])
+    ) if variant_key == 'resnet18' else ModelClass(dropout=config['dropout'])
     model = model.to(device)
 
     # 阶段1训练
@@ -722,7 +728,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
     # 根据任务类型选择损失函数
     task = config.get('task', 'detection')
     fp16_enabled = config.get('fp16', True)  # 默认启用 FP16
-    variant_key = config.get('variant', 'full')
+    variant_key = config.get('variant', 'resnet18')
 
     # 新变体专用损失
     assigner = None
@@ -738,14 +744,14 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
     else:
         # detection 模式
         # 检查是否为新变体
-        if variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn']:
+        if variant_key in ['swin_yolo', 'vit_yolo']:
             criterion = YOLOLoss(
                 lambda_box=1.0,
                 lambda_conf=1.0,
                 lambda_mono=0.1
             )
             assigner = YOLOTargetAssigner(grid_size=16, nearby_range=2)
-        elif variant_key == 'detr_style':
+        elif variant_key == 'detr':
             matcher = HungarianMatcher()
             criterion = DETRLoss(matcher=matcher)
         else:
@@ -797,13 +803,13 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
         if fp16_enabled:
             with torch.cuda.amp.autocast():
                 # 检查是否为新变体
-                is_new_variant = variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn', 'detr_style']
+                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                 if is_new_variant:
                     outputs, global_density = model(seq_1d, img_2d)
-                    if variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn']:
+                    if variant_key in ['swin_yolo', 'vit_yolo']:
                         assigned_target, pos_mask = assigner(labels)
                         loss = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
-                    else:  # detr_style
+                    else:  # detr
                         indices = matcher(outputs, {'labels': labels})
                         loss = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
                 else:
@@ -819,13 +825,13 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             scaler.update()
         else:
             # 检查是否为新变体
-            is_new_variant = variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn', 'detr_style']
+            is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
             if is_new_variant:
                 outputs, global_density = model(seq_1d, img_2d)
-                if variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn']:
+                if variant_key in ['swin_yolo', 'vit_yolo']:
                     assigned_target, pos_mask = assigner(labels)
                     loss = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
-                else:  # detr_style
+                else:  # detr
                     indices = matcher(outputs, {'labels': labels})
                     loss = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
             else:
@@ -872,13 +878,13 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 if fp16_enabled:
                     with torch.cuda.amp.autocast():
                         # 检查是否为新变体
-                        is_new_variant = variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn', 'detr_style']
+                        is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                         if is_new_variant:
                             outputs, global_density = model(seq_1d, img_2d)
-                            if variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn']:
+                            if variant_key in ['swin_yolo', 'vit_yolo']:
                                 assigned_target, pos_mask = assigner(labels)
                                 loss_total = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
-                            else:  # detr_style
+                            else:  # detr
                                 indices = matcher(outputs, {'labels': labels})
                                 loss_total = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
                         else:
@@ -896,13 +902,13 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                     scaler.update()
                 else:
                     # 检查是否为新变体
-                    is_new_variant = variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn', 'detr_style']
+                    is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                     if is_new_variant:
                         outputs, global_density = model(seq_1d, img_2d)
-                        if variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn']:
+                        if variant_key in ['swin_yolo', 'vit_yolo']:
                             assigned_target, pos_mask = assigner(labels)
                             loss_total = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
-                        else:  # detr_style
+                        else:  # detr
                             indices = matcher(outputs, {'labels': labels})
                             loss_total = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
                     else:
@@ -944,16 +950,16 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 else:
                     labels = labels.to(device)
                 # 检查是否为新变体
-                is_new_variant = variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn', 'detr_style']
+                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                 if is_new_variant:
                     outputs, global_density = model(seq_1d, img_2d)
-                    if variant_key in ['swin_yolo_fpn', 'vit_yolo_fpn']:
+                    if variant_key in ['swin_yolo', 'vit_yolo']:
                         assigned_target, pos_mask = assigner(labels)
                         loss_total = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
                         # 收集预测用于指标计算（取global_density）
                         all_preds.append(global_density.cpu())
                         all_targets.append(labels[:, 5:6].cpu())
-                    else:  # detr_style
+                    else:  # detr
                         indices = matcher(outputs, {'labels': labels})
                         loss_total = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
                         all_preds.append(global_density.cpu())
@@ -1202,7 +1208,7 @@ def train_variant(variant_key, config, device, data_roots=None):
 
     def create_variant_model():
         """根据变体类型创建模型"""
-        if variant_key == 'full':
+        if variant_key == 'resnet18':
             # 完整模型：使用 PETSNetMultimodal
             return PETSNetMultimodal(
                 seq_len=config.get('feature_len', 300),
@@ -1345,9 +1351,9 @@ def main():
                         help='时间偏移量（预测未来多少步，如1=0.05s后，2=0.1s后）')
 
     # 模型
-    parser.add_argument('--variant', type=str, default='full',
-                        choices=['1d_only', '2d_only', 'concat', 'add', 'cross_attn', 'full',
-                                'swin_yolo_fpn', 'vit_yolo_fpn', 'detr_style'],
+    parser.add_argument('--variant', type=str, default='resnet18',
+                        choices=['1d_only', '2d_only', 'concat', 'add', 'cross_attn', 'resnet18',
+                                'swin_yolo', 'vit_yolo', 'detr'],
                         help='模型变体（train模式）')
 
     # 架构配置（train模式，可选）
@@ -1517,7 +1523,7 @@ def main():
 
         metrics = eval_checkpoint(args.checkpoint, device, image_size=args.image_size)
         display_name = VARIANT_DISPLAY_NAMES.get(
-            next((k for k in VARIANT_MODELS if k in args.checkpoint), 'full'),
+            next((k for k in VARIANT_MODELS if k in args.checkpoint), 'resnet18'),
             os.path.basename(args.checkpoint)
         )
 

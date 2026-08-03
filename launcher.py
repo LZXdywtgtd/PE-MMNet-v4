@@ -88,49 +88,49 @@ ABLATION_PRESETS = {
     "a3": {"name": "双分支拼接", "args": "--variant concat"},
     "a4": {"name": "双分支加法", "args": "--variant add"},
     "a5": {"name": "Cross-Attention", "args": "--variant cross_attn"},
-    "a6": {"name": "完整模型 (full)", "args": "--variant full"},
+    "a6": {"name": "ResNet18基线", "args": "--variant resnet18"},
 
     # YOLO-FPN 变体
-    "b1": {"name": "Swin-YOLO-FPN", "args": "--variant swin_yolo_fpn --lr 1e-4"},
-    "b2": {"name": "ViT-YOLO-FPN", "args": "--variant vit_yolo_fpn --lr 1e-4"},
-    "b3": {"name": "DETR风格", "args": "--variant detr_style --lr 1e-4"},
+    "b1": {"name": "Swin-YOLO", "args": "--variant swin_yolo --lr 1e-4"},
+    "b2": {"name": "ViT-YOLO", "args": "--variant vit_yolo --lr 1e-4"},
+    "b3": {"name": "DETR", "args": "--variant detr --lr 1e-4"},
 
     # PatchTST 变体
-    "c1": {"name": "Swin-YOLO-PatchTST", "args": "--variant swin_yolo_patchtst --lr 1e-4"},
-    "c2": {"name": "ViT-YOLO-PatchTST", "args": "--variant vit_yolo_patchtst --lr 1e-4"},
+    "c1": {"name": "Swin-PatchTST", "args": "--variant swin_patchtst --lr 1e-4"},
+    "c2": {"name": "ViT-PatchTST", "args": "--variant vit_patchtst --lr 1e-4"},
 
     # 高级优化组合
-    "d1": {"name": "full + 门控融合", "args": "--variant full --fusion gated"},
-    "d2": {"name": "full + 坐标注意力", "args": "--variant full --use_coord_attn"},
-    "d3": {"name": "full + 三通道输入", "args": "--variant full --triple_channel"},
-    "d4": {"name": "分阶段训练", "args": "--variant full --staged_train"},
+    "d1": {"name": "ResNet18 + 门控融合", "args": "--variant resnet18 --fusion gated"},
+    "d2": {"name": "ResNet18 + 坐标注意力", "args": "--variant resnet18 --use_coord_attn"},
+    "d3": {"name": "ResNet18 + 三通道输入", "args": "--variant resnet18 --triple_channel"},
+    "d4": {"name": "分阶段训练", "args": "--variant resnet18 --staged_train"},
 
     # 团队协作快捷预设
-    "team_base": {"name": "【团队】基线模型", "args": "--variant full --epochs 100"},
-    "team_yolo": {"name": "【团队】YOLO系列", "args": "--variant swin_yolo_fpn --epochs 100 --lr 1e-4"},
-    "team_opt": {"name": "【团队】优化组合", "args": "--variant full --fusion gated --use_coord_attn --epochs 100"},
+    "team_base": {"name": "【团队】基线模型", "args": "--variant resnet18 --epochs 100"},
+    "team_yolo": {"name": "【团队】YOLO系列", "args": "--variant swin_yolo --epochs 100 --lr 1e-4"},
+    "team_opt": {"name": "【团队】优化组合", "args": "--variant resnet18 --fusion gated --use_coord_attn --epochs 100"},
 }
 
 # 团队协作配置模板
 TEAM_TEMPLATES = {
     "quick_baseline": {
         "name": "快速基线",
-        "args": "--variant full --epochs 50 --batch_size 8",
+        "args": "--variant resnet18 --epochs 50 --batch_size 8",
         "time_estimate": "~30分钟"
     },
     "quick_yolo": {
         "name": "快速YOLO",
-        "args": "--variant swin_yolo_fpn --epochs 50 --lr 1e-4 --batch_size 4",
+        "args": "--variant swin_yolo --epochs 50 --lr 1e-4 --batch_size 4",
         "time_estimate": "~40分钟"
     },
     "full_train": {
         "name": "完整训练",
-        "args": "--variant full --epochs 200 --batch_size 16",
+        "args": "--variant resnet18 --epochs 200 --batch_size 16",
         "time_estimate": "~2小时"
     },
     "ablation_small": {
         "name": "消融实验(小)",
-        "args": "--variant full --epochs 30 --batch_size 8",
+        "args": "--variant resnet18 --epochs 30 --batch_size 8",
         "time_estimate": "~15分钟"
     },
 }
@@ -185,33 +185,33 @@ def export_team_configs(filepath='team_configs.txt'):
         "",
         "# 快速基线训练 (~30分钟)",
         "# 适用场景：快速验证代码能跑通",
-        "python run_train.py --mode train --variant full --epochs 50 --batch_size 8",
+        "python run_train.py --mode train --variant resnet18 --epochs 50 --batch_size 8",
         "",
         "# YOLO系列训练 (~40分钟/模型)",
         "# 适用场景：需要更好的空间定位能力",
-        "python run_train.py --mode train --variant swin_yolo_fpn --epochs 100 --lr 1e-4",
-        "python run_train.py --mode train --variant vit_yolo_fpn --epochs 100 --lr 1e-4",
-        "python run_train.py --mode train --variant detr_style --epochs 100 --lr 1e-4",
+        "python run_train.py --mode train --variant swin_yolo --epochs 100 --lr 1e-4",
+        "python run_train.py --mode train --variant vit_yolo --epochs 100 --lr 1e-4",
+        "python run_train.py --mode train --variant detr --epochs 100 --lr 1e-4",
         "",
         "# PatchTST系列训练 (~40分钟/模型)",
         "# 适用场景：需要更好的时序建模能力",
-        "python run_train.py --mode train --variant swin_yolo_patchtst --epochs 100 --lr 1e-4",
+        "python run_train.py --mode train --variant swin_patchtst --epochs 100 --lr 1e-4",
         "",
         "# 优化组合训练 (~1小时)",
         "# 适用场景：追求最佳性能",
-        "python run_train.py --mode train --variant full --fusion gated --use_coord_attn --epochs 100",
+        "python run_train.py --mode train --variant resnet18 --fusion gated --use_coord_attn --epochs 100",
         "",
         "# 分阶段训练 (~1.5小时)",
         "# 适用场景：长序列数据训练",
-        "python run_train.py --mode train --variant full --staged_train --epochs 100",
+        "python run_train.py --mode train --variant resnet18 --staged_train --epochs 100",
         "",
         "# 三通道输入训练 (~1小时)",
         "# 适用场景：需要温度变化率信息",
-        "python run_train.py --mode train --variant full --triple_channel --epochs 100",
+        "python run_train.py --mode train --variant resnet18 --triple_channel --epochs 100",
         "",
         "# 完整训练 (~2小时)",
         "# 适用场景：最终交付模型",
-        "python run_train.py --mode train --variant full --epochs 200 --batch_size 16",
+        "python run_train.py --mode train --variant resnet18 --epochs 200 --batch_size 16",
         "",
         "# 消融实验快捷键（运行train_launcher.py后选择）",
         "# a6: 基线 | b1-b3: YOLO系列 | c1-c2: PatchTST系列 | d1-d4: 优化组合",

@@ -58,25 +58,31 @@ python run_train.py --mode train --epochs 100
 
 ## 模型变体
 
-| 变体 | 说明 | 适用场景 |
-|------|------|----------|
-| `full` | 完整 MM-DBFNet（默认） | 标准检测 |
-| `swin_yolo_fpn` | Swin-Tiny + YOLO-FPN | 空间定位 |
-| `vit_yolo_fpn` | ViT-Small + YOLO-FPN | 全局注意力 |
-| `detr_style` | ResNet-18 + Transformer | 全局感知 |
-| `swin_yolo_patchtst` | Swin + YOLO + PatchTST | 时序增强 |
+| 变体 | 说明 | 适用场景 | 性能等级 |
+|------|------|----------|----------|
+| `resnet18` | ResNet18 + CrossAttn（默认） | 标准检测 | L1 |
+| `swin_yolo` | Swin-Tiny + YOLO-FPN | 空间定位 | L1+ |
+| `vit_yolo` | ViT-Small + YOLO-FPN | 全局注意力 | L1 |
+| `detr` | ResNet-18 + Transformer | 全局感知 | L1+ |
+
+> **性能等级说明**：L1 ~8小时/100epochs, L1+ ~9小时, L2 ~10小时, L3 ~14小时
 
 ### 训练示例
 
 ```bash
-# YOLO系列（推荐）
-python run_train.py --variant swin_yolo_fpn --epochs 100 --lr 1e-4
+# 基础模型（推荐快速验证）
+python run_train.py --variant resnet18 --epochs 100
+
+# YOLO系列
+python run_train.py --variant swin_yolo --epochs 100
+python run_train.py --variant vit_yolo --epochs 100
+python run_train.py --variant detr --epochs 100
 
 # 优化组合
-python run_train.py --variant full --fusion gated --use_coord_attn --epochs 100
+python run_train.py --variant swin_yolo --fusion gated --use_coord_attn --epochs 100
 
 # 分阶段训练
-python run_train.py --variant full --staged_train --epochs 100
+python run_train.py --variant resnet18 --staged_train --epochs 100
 ```
 
 ---

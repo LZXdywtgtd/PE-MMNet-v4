@@ -291,7 +291,7 @@ model = freeze_model_backbone(
 from run_train import staged_training
 
 model = staged_training(
-    variant_key='full',
+    variant_key='resnet18',
     config=config,
     device=device,
     data_roots=data_roots
@@ -307,7 +307,7 @@ model = staged_training(
 ```python
 from launcher import build_command
 
-cmd = build_command(['--variant', 'full', '--epochs', '100'])
+cmd = build_command(['--variant', 'resnet18', '--epochs', '100'])
 ```
 
 ### export_team_configs

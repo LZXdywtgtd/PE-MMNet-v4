@@ -13,7 +13,7 @@ PE-MMNet v4 交互式批量训练与对比工具
     python tools/batch_train_gui.py
 
 快捷命令：
-    python tools/batch_train_gui.py --quick "full,100,0" "vit_small,100,0"
+    python tools/batch_train_gui.py --quick "resnet18,100,0" "vit_small,100,0"
 """
 
 import os
@@ -65,7 +65,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 # 默认参数
 DEFAULTS = {
-    'variant': 'full',
+    'variant': 'resnet18',
     'backbone_2d': 'resnet18',
     'backbone_1d': 'cnn_attn',
     'fusion': 'cross_attn',
@@ -101,7 +101,7 @@ class TaskStatus(Enum):
 class TrainingCommand:
     """训练命令封装"""
     id: str
-    variant: str = 'full'
+    variant: str = 'resnet18'
     backbone_2d: str = 'resnet18'
     backbone_1d: str = 'cnn_attn'
     fusion: str = 'cross_attn'
@@ -163,7 +163,7 @@ class TrainingCommand:
     def get_display_name(self) -> str:
         """获取显示名称（简短）"""
         # 简化的显示名称
-        if self.variant == 'full':
+        if self.variant == 'resnet18':
             name = f"{self.backbone_2d}_{self.backbone_1d}"
         else:
             name = self.variant
@@ -257,7 +257,7 @@ class TrainingCommand:
 
         return cls(
             id=task_id,
-            variant='full',
+            variant='resnet18',
             backbone_2d=backbone_2d,
             backbone_1d=backbone_1d,
             fusion=fusion,
@@ -1193,7 +1193,7 @@ class InteractiveCLI:
             for b2d, b1d, fusion, offset in presets[choice]:
                 cmd = TrainingCommand(
                     id=generate_id(),
-                    variant='full',
+                    variant='resnet18',
                     backbone_2d=b2d,
                     backbone_1d=b1d,
                     fusion=fusion,
