@@ -38,11 +38,18 @@ pip install -r requirements.txt
 
 ### 3. 开始训练
 
-**团队协作（推荐新手）**：
+**团队协作（推荐）**：
 ```bash
 python team_train.py
 ```
-选择数字即可训练！
+- 自动检测 GPU 显存，显示硬件等级
+- 任务状态可视化：已完成/可执行/警告/锁定
+- 支持依赖管理：前置任务未完成自动锁定
+- 可导入队友的检查点文件
+- 支持自动批量执行
+
+**外部配置**：
+将 `tasks/` 文件夹发给组员，组员放入项目目录即可自动加载任务。
 
 **交互式菜单**：
 ```bash
@@ -65,7 +72,7 @@ python run_train.py --mode train --epochs 100
 | `vit_yolo` | ViT-Small + YOLO-FPN | 全局注意力 | L1 |
 | `detr` | ResNet-18 + Transformer | 全局感知 | L1+ |
 
-> **性能等级说明**：L1 ~8小时/100epochs, L1+ ~9小时, L2 ~10小时, L3 ~14小时
+> **性能等级说明**：L1 ~12小时, L1+ ~12-13小时, L2 ~14小时, L2+ ~16小时, L3 ~24小时 (150 epochs)
 
 ### 训练示例
 
@@ -105,8 +112,13 @@ python run_train.py --variant resnet18 --staged_train --epochs 100
 project_v4/
 ├── run_train.py           # 统一训练入口
 ├── train_launcher.py      # 交互式启动器
-├── team_train.py          # 团队协作脚本
+├── team_train.py          # 团队协作脚本（配置驱动）
 ├── config.json            # 数据路径配置
+├── tasks/                # 任务配置目录（协调者分发）
+│   ├── team_baseline.json
+│   ├── team_optimization.json
+│   └── batch_ablation.json
+├── checkpoints/           # 检查点目录
 │
 ├── data/                  # 数据加载
 │   └── dataset_multimodal.py
@@ -127,7 +139,8 @@ project_v4/
     ├── 架构设计文档.md
     ├── 调参与算法工程指导文档.md
     ├── 项目算法与训练实验设计报告.md
-    └── 控制台输出样式.md
+    ├── 控制台输出样式.md
+    └── 团队协作训练指南.md
 ```
 
 ---
@@ -159,6 +172,9 @@ project_v4/
 
 ## 版本信息
 
-当前版本：v4.5.0 (2026-08-02)
+当前版本：v4.6.0 (2026-08-03)
 
-主要更新：导师反馈8项优化建议 + 团队协作功能
+主要更新：
+- 配置驱动的团队任务分发系统
+- 模型变体命名规范化
+- 训练输出升级（每10轮显示盒子汇总）
