@@ -25,9 +25,16 @@ from typing import Dict, Set, Optional
 import torch
 
 # 颜色支持
+# 注意：在 Windows 下使用 colorama 时需要处理 Unicode 编码问题
 try:
+    import sys
+    import io
+    # 设置标准输出为 UTF-8 模式
+    if sys.platform == 'win32':
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
     from colorama import init, Fore, Style
-    init(autoreset=True)
+    init(autoreset=True, strip=False)
     COLORS = {
         'green': Fore.GREEN,
         'blue': Fore.BLUE,
@@ -396,10 +403,10 @@ def print_menu(completed: Set[str], hardware_level: str):
     print(f"\n当前硬件等级: {COLORS['blue']}{hardware_level}{COLORS['reset']} (显存: {gpu_mem:.1f}GB)")
     print(f"已完成任务: {len(completed)}/{len(all_tasks)}")
 
-    print(f"\n状态标记: {COLORS['green']}[✓] 已完成{COLORS['reset']} | "
-          f"{COLORS['blue']}[▶] 可执行{COLORS['reset']} | "
+    print(f"\n状态标记: {COLORS['green']}[OK] 已完成{COLORS['reset']} | "
+          f"{COLORS['blue']}[>] 可执行{COLORS['reset']} | "
           f"{COLORS['yellow']}[!] 硬件警告{COLORS['reset']} | "
-          f"{COLORS['gray']}[🔒] 依赖未完成{COLORS['reset']}")
+          f"{COLORS['gray']}[X] 依赖未完成{COLORS['reset']}")
 
     print()
 
@@ -423,16 +430,20 @@ def print_menu(completed: Set[str], hardware_level: str):
             status = get_task_status(task_id, completed, hardware_level)
 
             status_symbols = {
-                'completed': (f"{COLORS['green']}✓{COLORS['reset']}", COLORS['green']),
-                'executable': (f"{COLORS['blue']}▶{COLORS['reset']}", COLORS['blue']),
+                'completed': (f"{COLORS['green']}OK{COLORS['reset']}", COLORS['green']),
+                'executable': (f"{COLORS['blue']}>{COLORS['reset']}", COLORS['blue']),
                 'warning': (f"{COLORS['yellow']}!{COLORS['reset']}", COLORS['yellow']),
-                'locked': (f"{COLORS['gray']}🔒{COLORS['reset']}", COLORS['gray']),
+                'locked': (f"{COLORS['gray']}X{COLORS['reset']}", COLORS['gray']),
             }
             prefix, color = status_symbols[status]
 
             print(f"  [{idx:>2}] {prefix} {color}{task['name']}{COLORS['reset']}")
             print(f"       {task['desc']}")
-            print(f"       📊 {task['level']} | ⏱️ {task['time']} | 💾 {task['gpu_mem']}")
+            # 显示等级、时间和显存（如果有）
+            level = task.get('level', 'N/A')
+            time_str = task.get('time', 'N/A')
+            gpu_mem = task.get('gpu_mem', 'N/A')
+            print(f"       [L] {level} | [T] {time_str} | [G] {gpu_mem}")
 
             if status == 'locked':
                 deps = task.get('deps', [])
