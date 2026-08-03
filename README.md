@@ -64,7 +64,7 @@ python train_launcher.py
 
 **直接训练**：
 ```bash
-python run_train.py --mode train --epochs 100
+python run_train.py --mode train --epochs 150
 ```
 
 ---

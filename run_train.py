@@ -1519,7 +1519,7 @@ def main():
                         help='批次大小，不指定则自动根据显存选择')
     parser.add_argument('--lr', type=float, default=3e-4, help='学习率')
     parser.add_argument('--dropout', type=float, default=0.2, help='Dropout')
-    parser.add_argument('--patience', type=int, default=20, help='早停耐心值')
+    parser.add_argument('--patience', type=int, default=30, help='早停耐心值')
     parser.add_argument('--lambda_mono', type=float, default=0.1, help='单调性损失权重')
     parser.add_argument('--predict_offset', type=int, default=0,
                         help='时间偏移量（预测未来多少步，如1=0.05s后，2=0.1s后）')

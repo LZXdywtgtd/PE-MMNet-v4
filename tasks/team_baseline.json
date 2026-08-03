@@ -1,42 +1,52 @@
 [
   {
-    "id": "BASELINE_1",
+    "id": "A1",
     "name": "ResNet18基线",
-    "desc": "轻量骨干，适合快速验证",
-    "args": "--variant resnet18 --epochs 150",
+    "desc": "轻量级CNN骨干，所有优化的基准线",
+    "args": "--variant resnet18 --epochs 150 --patience 30",
     "level": "L1",
     "time": "~12小时",
     "gpu_mem": "~2GB",
     "deps": []
   },
   {
-    "id": "BASELINE_2",
+    "id": "A2",
     "name": "Swin-YOLO基线",
-    "desc": "推荐！网格回归，适合空间定位",
-    "args": "--variant swin_yolo --epochs 150 --lr 1e-4",
+    "desc": "推荐！Swin-Tiny骨干+YOLO网格回归，大幅提升空间定位",
+    "args": "--variant swin_yolo --epochs 150 --patience 30 --lr 1e-4",
     "level": "L1+",
-    "time": "~12-13小时",
+    "time": "~18小时",
     "gpu_mem": "~4GB",
     "deps": []
   },
   {
-    "id": "BASELINE_3",
+    "id": "A3",
     "name": "ViT-YOLO基线",
-    "desc": "ViT风格注意力",
-    "args": "--variant vit_yolo --epochs 150 --lr 1e-4",
+    "desc": "基于ViT-Small的YOLO变体，验证Transformer做骨干的效果",
+    "args": "--variant vit_yolo --epochs 150 --patience 30 --lr 1e-4",
     "level": "L1",
     "time": "~12小时",
     "gpu_mem": "~3GB",
     "deps": []
   },
   {
-    "id": "BASELINE_4",
+    "id": "A4",
     "name": "DETR基线",
-    "desc": "Transformer风格，全局上下文感知",
-    "args": "--variant detr --epochs 150 --lr 1e-4",
+    "desc": "纯Transformer的DETR端到端检测，验证全局上下文感知",
+    "args": "--variant detr --epochs 150 --patience 30 --lr 1e-4",
     "level": "L1+",
-    "time": "~13-14小时",
+    "time": "~18小时",
     "gpu_mem": "~5GB",
+    "deps": []
+  },
+  {
+    "id": "A5",
+    "name": "Swin-PatchTST",
+    "desc": "升级1D时序骨干为PatchTST，提升热应力时序建模能力",
+    "args": "--variant swin_yolo_patchtst --epochs 150 --patience 30 --lr 1e-4",
+    "level": "L2",
+    "time": "~20小时",
+    "gpu_mem": "~4GB",
     "deps": []
   }
 ]

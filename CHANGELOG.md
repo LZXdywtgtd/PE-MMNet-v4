@@ -52,6 +52,14 @@
   - 支持 `NO_COLOR` 环境变量
   - Windows Terminal / cmd.exe 兼容
 
+#### 默认参数调整
+
+- **统一训练默认设置**
+  - `epochs` 默认值：100 → **150**
+  - `patience` 默认值：20 → **30**
+  - 影响范围：run_train.py、launcher.py、batch_train_gui.py
+  - 指令指定参数时优先使用指定值
+
 #### 代码修改
 
 - `run_train.py` 新增：

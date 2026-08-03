@@ -106,7 +106,7 @@ class TrainingCommand:
     backbone_1d: str = 'cnn_attn'
     fusion: str = 'cross_attn'
     predict_offset: int = 0
-    epochs: int = 100
+    epochs: int = 150
     task: str = 'detection'
     image_size: int = 512  # 图像分辨率
     batch_size: Optional[int] = None  # None 表示自动
@@ -908,7 +908,7 @@ class InteractiveCLI:
 
         # ========== 3. 训练参数 ==========
         print("  【训练参数】")
-        epochs = input("    训练轮数 [100]: ").strip() or "100"
+        epochs = input("    训练轮数 [150]: ").strip() or "150"
         print()
 
         # ========== 4. 高级参数 ==========
@@ -1198,7 +1198,7 @@ class InteractiveCLI:
                     backbone_1d=b1d,
                     fusion=fusion,
                     predict_offset=offset,
-                    epochs=100,
+                    epochs=150,
                     task='detection'
                 )
                 success, msg, existing_id = self.trainer.add_command(cmd)
