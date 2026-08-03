@@ -1026,6 +1026,9 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
         torch.cuda.empty_cache()
         model.train()
 
+    # 初始化 epoch_elapsed（防止异常路径下未定义）
+    epoch_elapsed = 0.0
+
     # ============================================================
     # 训练循环
     # ============================================================
