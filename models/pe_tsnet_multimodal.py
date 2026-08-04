@@ -267,6 +267,12 @@ class ResNet18Backbone2D(nn.Module):
 
         # 特征维度：ResNet-18 的 layer4 输出通道数为 512
         self.feature_dim = 512
+        self.output_spatial = False  # 是否输出空间特征图
+
+    def set_spatial_output(self, enabled=True):
+        """切换是否输出空间特征图（供 DETR 等模型使用）"""
+        self.output_spatial = enabled
+        return self
 
     def forward(self, x):
         """
@@ -276,7 +282,7 @@ class ResNet18Backbone2D(nn.Module):
             x: 输入图像张量，形状 (batch, in_channels, H, W)
 
         Returns:
-            feat_2d: 2D 特征向量，形状 (batch, 512)
+            feat_2d: 2D 特征向量，形状 (batch, 512) 或 (batch, 512, H', W')
         """
         # 通过 ResNet 的各层
         x = self.resnet.conv1(x)
@@ -288,6 +294,10 @@ class ResNet18Backbone2D(nn.Module):
         x = self.resnet.layer2(x)
         x = self.resnet.layer3(x)
         x = self.resnet.layer4(x)
+
+        if self.output_spatial:
+            # 输出空间特征图（供 DETR 使用）
+            return x  # (B, 512, H', W')
 
         # 全局平均池化：将 (batch, 512, H, W) → (batch, 512, 1, 1) → (batch, 512)
         x = F.adaptive_avg_pool2d(x, (1, 1))
@@ -759,24 +769,40 @@ class CrossAttentionFusion(nn.Module):
         self.num_heads = num_heads
 
         # 动态计算每个头的维度，确保能被 num_heads 整除
-        self.head_dim_2d = dim_2d // num_heads  # 512 / 4 = 128
-        self.head_dim_1d = dim_1d // num_heads  # 64 / 4 = 16
+        # 如果 dim_2d 不能被 num_heads 整除，扩展到最近的倍数
+        self.head_dim_2d = max(1, dim_2d // num_heads)
+        self.head_dim_1d = max(1, dim_1d // num_heads)
+
+        # 记录实际的投影维度（用于扩展/压缩）
+        self.proj_dim_2d = self.head_dim_2d * num_heads
+        self.proj_dim_1d = self.head_dim_1d * num_heads
+
+        # 投影层（当维度不能整除头数时使用）
+        if self.proj_dim_2d != dim_2d:
+            self.proj_2d = nn.Linear(self.proj_dim_2d, dim_2d)
+        else:
+            self.proj_2d = nn.Identity()
+        if self.proj_dim_1d != dim_1d:
+            self.proj_1d = nn.Linear(self.proj_dim_1d, dim_1d)
+        else:
+            self.proj_1d = nn.Identity()
 
         # -------------------------------------------------------------------------
         # 图像 → 时序 的交叉注意力
         # -------------------------------------------------------------------------
         # Q: 2D 特征（图像），K/V: 1D 特征（时序）
-        self.q_linear_2d = nn.Linear(dim_2d, dim_2d)
-        self.k_linear_1d = nn.Linear(dim_1d, dim_2d)
-        self.v_linear_1d = nn.Linear(dim_1d, dim_2d)
+        # 输出维度使用 proj_dim（适配多头注意力）
+        self.q_linear_2d = nn.Linear(dim_2d, self.proj_dim_2d)
+        self.k_linear_1d = nn.Linear(dim_1d, self.proj_dim_2d)
+        self.v_linear_1d = nn.Linear(dim_1d, self.proj_dim_2d)
 
         # -------------------------------------------------------------------------
         # 时序 → 图像 的交叉注意力
         # -------------------------------------------------------------------------
         # Q: 1D 特征（时序），K/V: 2D 特征（图像）
-        self.q_linear_1d = nn.Linear(dim_1d, dim_1d)
-        self.k_linear_2d = nn.Linear(dim_2d, dim_1d)
-        self.v_linear_2d = nn.Linear(dim_2d, dim_1d)
+        self.q_linear_1d = nn.Linear(dim_1d, self.proj_dim_1d)
+        self.k_linear_2d = nn.Linear(dim_2d, self.proj_dim_1d)
+        self.v_linear_2d = nn.Linear(dim_2d, self.proj_dim_1d)
 
         # -------------------------------------------------------------------------
         # 输出归一化
@@ -794,11 +820,11 @@ class CrossAttentionFusion(nn.Module):
         前向传播：双向交叉注意力融合
 
         Args:
-            feat_2d: 2D 图像特征，(batch, 512)
-            feat_1d: 1D 时序特征，(batch, 64)
+            feat_2d: 2D 图像特征，(batch, dim_2d)
+            feat_1d: 1D 时序特征，(batch, dim_1d)
 
         Returns:
-            fused: 融合后的特征，(batch, 576) = 512 + 64
+            fused: 融合后的特征，(batch, dim_2d + dim_1d)
         """
         batch_size = feat_2d.size(0)
 
@@ -806,9 +832,9 @@ class CrossAttentionFusion(nn.Module):
         # 方向 1：图像查询时序
         # feat_2d 作为 Q，feat_1d 作为 K 和 V
         # -------------------------------------------------------------------------
-        q2 = self.q_linear_2d(feat_2d)                           # (batch, 512)
-        k1 = self.k_linear_1d(feat_1d)                           # (batch, 512)
-        v1 = self.v_linear_1d(feat_1d)                           # (batch, 512)
+        q2 = self.q_linear_2d(feat_2d)                           # (batch, proj_dim_2d)
+        k1 = self.k_linear_1d(feat_1d)                           # (batch, proj_dim_2d)
+        v1 = self.v_linear_1d(feat_1d)                           # (batch, proj_dim_2d)
 
         # 多头注意力：reshape 为 (batch, num_heads, head_dim_2d)
         q2 = q2.view(batch_size, self.num_heads, self.head_dim_2d)
@@ -821,18 +847,19 @@ class CrossAttentionFusion(nn.Module):
 
         # 加权求和：attn_weights · V
         attn_output_2d_to_1d = torch.einsum('bh,bhd->bhd', attn_weights_2d_to_1d, v1)
-        attn_output_2d_to_1d = attn_output_2d_to_1d.contiguous().view(batch_size, self.dim_2d)
+        attn_output_2d_to_1d = attn_output_2d_to_1d.contiguous().view(batch_size, self.proj_dim_2d)
 
-        # 残差连接 + LayerNorm
+        # 残差连接 + LayerNorm（投影到 dim_2d）
+        attn_output_2d_to_1d = self.proj_2d(attn_output_2d_to_1d)
         fused_2d = self.norm_2d(feat_2d + attn_output_2d_to_1d)
 
         # -------------------------------------------------------------------------
         # 方向 2：时序查询图像
         # feat_1d 作为 Q，feat_2d 作为 K 和 V
         # -------------------------------------------------------------------------
-        q1 = self.q_linear_1d(feat_1d)                           # (batch, 64)
-        k2 = self.k_linear_2d(feat_2d)                           # (batch, 64)
-        v2 = self.v_linear_2d(feat_2d)                           # (batch, 64)
+        q1 = self.q_linear_1d(feat_1d)                           # (batch, proj_dim_1d)
+        k2 = self.k_linear_2d(feat_2d)                           # (batch, proj_dim_1d)
+        v2 = self.v_linear_2d(feat_2d)                           # (batch, proj_dim_1d)
 
         # 多头注意力
         q1 = q1.view(batch_size, self.num_heads, self.head_dim_1d)
@@ -843,15 +870,16 @@ class CrossAttentionFusion(nn.Module):
         attn_weights_1d_to_2d = F.softmax(attn_scores_1d_to_2d, dim=-1)
 
         attn_output_1d_to_2d = torch.einsum('bh,bhd->bhd', attn_weights_1d_to_2d, v2)
-        attn_output_1d_to_2d = attn_output_1d_to_2d.contiguous().view(batch_size, self.dim_1d)
+        attn_output_1d_to_2d = attn_output_1d_to_2d.contiguous().view(batch_size, self.proj_dim_1d)
 
-        # 残差连接 + LayerNorm
+        # 残差连接 + LayerNorm（投影到 dim_1d）
+        attn_output_1d_to_2d = self.proj_1d(attn_output_1d_to_2d)
         fused_1d = self.norm_1d(feat_1d + attn_output_1d_to_2d)
 
         # -------------------------------------------------------------------------
         # 融合两个方向的输出
         # -------------------------------------------------------------------------
-        fused = torch.cat([fused_2d, fused_1d], dim=-1)  # (batch, 512 + 64 = 576)
+        fused = torch.cat([fused_2d, fused_1d], dim=-1)
         fused = self.fusion(fused)
 
         return fused

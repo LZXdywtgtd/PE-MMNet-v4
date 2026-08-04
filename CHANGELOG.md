@@ -6,6 +6,154 @@
 
 ---
 
+## [v4.6.1] - 2026-08-04
+
+### 修复：三个新变体训练循环错误
+
+本次更新修复了 swin_yolo、vit_yolo、detr 三个新变体的训练循环错误，确保所有模型变体均可正常运行。
+
+#### 推理模式索引修复
+
+**问题**：推理模式下使用 `gather` + `expand` 索引导致维度不匹配错误
+
+**原因**：
+- `argmax` 在 `(B,256,1)` 上 `dim=1` 产生 `(B,1)` 而非 `(B,)`
+- `expand` 无法在维度不匹配时工作
+
+**修复**：改用 `torch.arange` 直接索引
+```python
+# 修复前（错误）
+best_idx = conf.argmax(dim=1, keepdim=True)
+grid_feat = grid_pred.gather(1, best_idx.expand(-1, -1, 6))
+
+# 修复后（正确）
+best_idx = conf.squeeze(-1).argmax(dim=1)  # (B,)
+B = grid_pred.size(0)
+grid_feat = grid_pred[torch.arange(B, device=grid_pred.device), best_idx]
+```
+
+**影响文件**：
+- `models/pe_tsnet_yolo.py` (SwinYOLOFPN)
+- `models/pe_tsnet_yolo.py` (ViTYOLOFPN)
+- `models/pe_tsnet_detr.py` (DETRStyle)
+
+#### ViT 输入尺寸修复
+
+**问题**：`vit_yolo` 变体 `AssertionError: Input height (512) doesn't match model (224)`
+
+**原因**：timm ViT-Small 固定要求 224×224 输入，但数据集图像为 512×512
+
+**修复**：添加 `input_resize` 层（Conv2d 2→3 通道 + 512→224 双线性插值）
+```python
+self.input_resize = nn.Sequential(
+    nn.Conv2d(2, 3, kernel_size=1, bias=False),
+    nn.BatchNorm2d(3),
+    nn.ReLU()
+)
+```
+
+**影响文件**：`models/pe_tsnet_yolo.py` (ViTYOLOBackbone2D)
+
+#### DETR 空间特征输出修复
+
+**问题**：`detr` 变体 `RuntimeError: Expected 3D or 4D input to conv2d, but got input of size: [4, 512]`
+
+**原因**：ResNet18Backbone 默认返回全局池化向量 `(B,512)` 而非空间特征图 `(B,512,H,W)`
+
+**修复**：为 ResNet18Backbone 添加 `set_spatial_output()` 方法
+```python
+# 新增方法
+def set_spatial_output(self, enabled=True):
+    self.output_spatial = enabled
+    return self
+
+# DETR 中调用
+self.backbone_2d.set_spatial_output(True)  # 输出 (B, 512, 16, 16)
+```
+
+**影响文件**：
+- `models/pe_tsnet_multimodal.py` (ResNet18Backbone2D)
+- `models/pe_tsnet_detr.py` (DETRStyle)
+
+#### DETR 推理模式融合修复
+
+**问题**：DETR 推理模式 `query_feat` 形状与 CrossAttentionFusion 不匹配
+
+**原因**：训练模式应返回原始预测（供损失计算），推理模式才做融合
+
+**修复**：训练模式直接返回 `detr_pred`，推理模式才做 `pooling + fusion`
+```python
+if self.training:
+    return detr_pred, global_density  # 训练：不做融合
+else:
+    # 推理：pooling + fusion + output_head
+    fused = self.fusion(query_feat, feat_1d)
+    output = self.output_head(fused)
+    return output, global_density
+```
+
+#### DETR 验证循环修复
+
+**问题**：DETR 验证模式损失计算形状不匹配
+
+**原因**：model.eval() 返回 `(B,6)` 但 DETRLoss 期望 `(B,100,6)`
+
+**修复**：DETR 验证模式跳过损失计算，仅用 `global_density` 计算指标
+```python
+else:  # detr eval mode
+    loss_total = torch.tensor(0.0, device=model_output.device)
+    all_preds.append(global_density.cpu())
+    all_targets.append(labels[:, 5:6].cpu())
+```
+
+#### YOLO 验证循环修复
+
+**问题**：YOLO 验证模式损失计算形状不匹配
+
+**修复**：tile `(B,6)` → `(B,256,6)`，所有网格标记为正样本
+```python
+if model_output.ndim == 3:
+    grid_pred = model_output
+    assigned_target, pos_mask = assigner(labels)
+    loss_total = criterion(...)
+else:
+    B_v = model_output.size(0)
+    grid_pred = model_output.unsqueeze(1).expand(-1, 256, -1)
+    pos_mask = torch.ones(B_v, 256, dtype=torch.bool, device=model_output.device)
+    loss_total = criterion(...)
+```
+
+#### global_density 维度警告修复
+
+**问题**：`UserWarning: Using a target size (torch.Size([4, 1])) with a non-matching input size (torch.Size([4, 1, 1]))`
+
+**修复**：在 YOLOLoss 中添加 `squeeze(-1)`
+```python
+if global_density.ndim == 3:
+    global_density = global_density.squeeze(-1)  # (B,1,1) → (B,1)
+```
+
+#### Emoji 编码错误修复
+
+**问题**：`UnicodeEncodeError: 'gbk' codec can't encode character '\U00002714'`
+
+**修复**：所有 Emoji 替换为 ASCII 文本
+- `✅` → `[OK]`
+- `❌` → `[FAIL]`
+- 其他 Emoji 类似处理
+
+#### 文档全面重写
+
+- **README.md**：完整重写，覆盖所有4个变体、显存占用、高级参数
+- **架构设计文档.md**：完整重写，4种模型架构详解、数据流、损失函数选择表
+- **团队协作训练指南.md**：完整重写，team_train.py 完整使用手册
+- **快速配置指南.md**：更新以匹配新架构
+- **开发人员文档.md**：更新以反映当前代码状态
+- **API文档.md**：更新函数签名和导出
+- **CHANGELOG.md**：新增 v4.6.1 版本记录
+
+---
+
 ## [v4.6.0] - 2026-08-03
 
 ### 新增：动态训练时间估算与团队协作增强

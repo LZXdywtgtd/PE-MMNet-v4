@@ -273,13 +273,14 @@ class DETRStyle(nn.Module):
         self.num_queries = num_queries
 
         # 特征图尺寸（ResNet-18 最终特征图）
-        self.feat_size = 16  # 256 / 16 = 16
+        self.feat_size = 16  # 512 / 16 = 32 grids
 
-        # 2D 骨干：ResNet-18
+        # 2D 骨干：ResNet-18（启用空间特征输出）
         self.backbone_2d = ResNet18Backbone2D(
             in_channels=image_channels,
             pretrained=pretrained_2d
         )
+        self.backbone_2d.set_spatial_output(True)  # 输出 (B, 512, 16, 16) 而非 (B, 512)
 
         # 投影层：512 -> d_model
         self.input_proj = nn.Conv2d(512, d_model, kernel_size=1)
@@ -369,28 +370,27 @@ class DETRStyle(nn.Module):
         # DETR 预测
         detr_pred = self.detr_head(decoder_out)  # (B, num_queries, 6)
 
+        # 全局密度：取所有 query 预测密度的最大值（两个模式都用）
+        global_density = detr_pred[..., 5:6].max(dim=1, keepdim=True)[0]  # (B, 1)
+
         # ========== 模式判断 ==========
         # ✅ 使用 self.training 判断模式
         if self.training:
-            # 训练模式：返回完整 query 预测
-            query_feat = detr_pred  # (B, 100, 6)
-        else:
-            # 推理模式：取最高 conf 的预测
-            conf = detr_pred[..., 4:5]  # (B, num_queries, 1)
-            best_idx = conf.argmax(dim=1, keepdim=True)  # (B, 1, 1)
+            # 训练模式：返回完整 detr_pred 供损失计算（不做融合）
+            return detr_pred, global_density
 
-            # gather 需要扩展索引
-            best_idx_expanded = best_idx.unsqueeze(-1).expand(-1, -1, 6)  # (B, 1, 6)
-            query_feat = detr_pred.gather(1, best_idx_expanded).squeeze(1)  # (B, 6)
+        # ========== 推理模式 ==========
+        # 取最高 conf 的预测
+        conf = detr_pred[..., 4:5]  # (B, num_queries, 1)
+        best_idx = conf.squeeze(-1).argmax(dim=1)  # (B,)
+        B_d = detr_pred.size(0)
+        query_feat = detr_pred[torch.arange(B_d, device=detr_pred.device), best_idx]  # (B, 6)
 
         # ========== 1D 分支 ==========
         feat_1d = self.backbone_1d(x_1d)  # (B, 64)
 
         # ========== 融合 ==========
         fused = self.fusion(query_feat, feat_1d)
-
-        # 全局密度：取所有 query 预测密度的最大值
-        global_density = detr_pred[..., 5:6].max(dim=1, keepdim=True)[0]  # (B, 1)
 
         # ========== 输出 ==========
         output = self.output_head(fused)

@@ -675,8 +675,10 @@ class SegmentationLoss(nn.Module):
         Returns:
             loss: 分割损失，标量
         """
+        # 分割 BCE 也需要安全处理
+        pred_sigmoid = torch.clamp(pred, min=-50, max=50)
         loss_dice = self.dice_loss(pred, target)
-        loss_bce = self.bce_loss(pred, target)
+        loss_bce = F.binary_cross_entropy_with_logits(pred_sigmoid, target)
         return self.lambda_dice * loss_dice + self.lambda_bce * loss_bce
 
 
@@ -863,11 +865,19 @@ class YOLOLoss(nn.Module):
         target_conf = target[..., 4:5][positive_mask]
 
         if len(pred_conf) > 0:
-            loss_conf = F.binary_cross_entropy(pred_conf, target_conf)
+            # 使用 binary_cross_entropy_with_logits（安全用于 FP16）
+            # 但输入应该是 logits，需要 clip 避免 infinity
+            pred_conf_logits = torch.clamp(pred_conf, min=-50, max=50)
+            loss_conf = F.binary_cross_entropy_with_logits(
+                pred_conf_logits, target_conf
+            )
         else:
             loss_conf = torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
 
         # ========== 密度 MSE 损失 ==========
+        # 防御性：确保 global_density 和 target_density 维度一致
+        if global_density.ndim == 3:
+            global_density = global_density.squeeze(-1)  # (B, 1, 1) -> (B, 1)
         loss_density = F.mse_loss(global_density, target_density)
 
         # ========== 单调性损失（简化版） ==========
@@ -1034,9 +1044,9 @@ class DETRLoss(nn.Module):
                 tgt_labels[:4].unsqueeze(0).expand(len(pred_idx), -1)
             ).mean()
 
-            # 置信度损失 (BCE)
-            loss_conf += F.binary_cross_entropy(
-                pred[b, pred_idx, 4:5],
+            # 置信度损失 (BCE) - 使用 binary_cross_entropy_with_logits 安全用于 FP16
+            loss_conf += F.binary_cross_entropy_with_logits(
+                torch.clamp(pred[b, pred_idx, 4:5], min=-50, max=50),
                 tgt_labels[4:5].unsqueeze(0).expand(len(pred_idx), -1)
             ).mean()
 

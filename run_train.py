@@ -174,8 +174,22 @@ def auto_select_config(args):
     has_user_image_size = getattr(args, '_user_specified', {}).get('image_size', False)
     has_user_batch_size = getattr(args, '_user_specified', {}).get('batch_size', False)
 
-    # FP16 逻辑：--no_fp16 时禁用
-    fp16_enabled = not args.no_fp16
+    # FP16 逻辑：
+    # 1. --no_fp16 时禁用
+    # 2. resnet18 等旧变体默认禁用（FP16 多epoch训练后易产生NaN）
+    # 3. 新变体（swin_yolo, vit_yolo, detr）可启用 FP16
+    variant = getattr(args, 'variant', 'resnet18')
+    new_variants = ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst', 'vit_yolo_patchtst']
+    is_new_variant = variant in new_variants
+
+    if args.no_fp16:
+        fp16_enabled = False
+    elif not is_new_variant:
+        # 旧变体默认禁用 FP16（更稳定）
+        fp16_enabled = False
+    else:
+        # 新变体默认启用 FP16
+        fp16_enabled = True
 
     # 构建配置
     config = {'fp16': fp16_enabled}
@@ -589,6 +603,15 @@ def eval_checkpoint(checkpoint_path, device, image_size=None):
             image_size=image_size,
             pretrained_2d=True,
             task=task
+        )
+    elif variant_key in ['swin_yolo', 'vit_yolo', 'detr']:
+        # YOLO/DETR 变体
+        ModelClass = VARIANT_MODELS.get(variant_key, PETSNetMultimodal)
+        model = ModelClass(
+            seq_len=300,
+            image_channels=2,
+            image_size=image_size,
+            pretrained_2d=True
         )
     else:
         ModelClass = VARIANT_MODELS.get(variant_key, PETSNetMultimodal)
@@ -1049,13 +1072,14 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 # 检查是否为新变体
                 is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                 if is_new_variant:
-                    outputs, global_density = model(seq_1d, img_2d)
+                    grid_pred, global_density = model(seq_1d, img_2d)
                     if variant_key in ['swin_yolo', 'vit_yolo']:
                         assigned_target, pos_mask = assigner(labels)
-                        loss = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                        loss = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                     else:  # detr
-                        indices = matcher(outputs, {'labels': labels})
-                        loss = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                        indices = matcher(grid_pred, {'labels': labels})
+                        loss = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                    outputs = grid_pred
                 else:
                     outputs = model(seq_1d, img_2d)
                     if task == 'segmentation':
@@ -1069,13 +1093,14 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 # 检查是否为新变体
                 is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                 if is_new_variant:
-                    outputs, global_density = model(seq_1d, img_2d)
+                    grid_pred, global_density = model(seq_1d, img_2d)
                     if variant_key in ['swin_yolo', 'vit_yolo']:
                         assigned_target, pos_mask = assigner(labels)
-                        loss = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                        loss = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                     else:  # detr
-                        indices = matcher(outputs, {'labels': labels})
-                        loss = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                        indices = matcher(grid_pred, {'labels': labels})
+                        loss = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                    outputs = grid_pred
                 else:
                     outputs = model(seq_1d, img_2d)
                     if task == 'segmentation':
@@ -1105,13 +1130,13 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             with torch.amp.autocast('cuda', enabled=False):
                 is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                 if is_new_variant:
-                    outputs, global_density = model(seq_1d, img_2d)
+                    grid_pred, global_density = model(seq_1d, img_2d)
                     if variant_key in ['swin_yolo', 'vit_yolo']:
                         assigned_target, pos_mask = assigner(labels)
-                        loss = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                        loss = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                     else:  # detr
-                        indices = matcher(outputs, {'labels': labels})
-                        loss = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                        indices = matcher(grid_pred, {'labels': labels})
+                        loss = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices)
                 else:
                     outputs = model(seq_1d, img_2d)
                     if task == 'segmentation':
@@ -1137,7 +1162,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-        print_success("干跑验证通过 ✅")
+        print_success("干跑验证通过 [OK]")
     except RuntimeError as e:
         if 'out of memory' in str(e).lower():
             torch.cuda.empty_cache()
@@ -1183,13 +1208,14 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                         # 检查是否为新变体
                         is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                         if is_new_variant:
-                            outputs, global_density = model(seq_1d, img_2d)
+                            grid_pred, global_density = model(seq_1d, img_2d)
                             if variant_key in ['swin_yolo', 'vit_yolo']:
                                 assigned_target, pos_mask = assigner(labels)
-                                loss_total = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                                loss_total = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                             else:  # detr
-                                indices = matcher(outputs, {'labels': labels})
-                                loss_total = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                                indices = matcher(grid_pred, {'labels': labels})
+                                loss_total = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                            outputs = grid_pred  # 用于调试打印
                         else:
                             # resnet18 等标准变体
                             outputs = model(seq_1d, img_2d)
@@ -1199,10 +1225,6 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                                 loss_total = criterion(outputs, labels)
                             else:
                                 loss_total, _ = criterion(outputs, labels)
-                    # 调试：在 autocast 外部打印
-                    if epoch == 0 and train_batch_idx < 3:
-                        print(f"  [DEBUG] FP16 outputs[:2]={outputs[:2].detach().cpu().numpy()}")
-                        print(f"  [DEBUG] FP16 outputs is_nan={torch.isnan(outputs).any().item()}")
                     scaler.scale(loss_total).backward()
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -1212,18 +1234,16 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                     # 检查是否为新变体
                     is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                     if is_new_variant:
-                        outputs, global_density = model(seq_1d, img_2d)
+                        grid_pred, global_density = model(seq_1d, img_2d)
                         if variant_key in ['swin_yolo', 'vit_yolo']:
                             assigned_target, pos_mask = assigner(labels)
-                            loss_total = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                            loss_total = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                         else:  # detr
-                            indices = matcher(outputs, {'labels': labels})
-                            loss_total = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                            indices = matcher(grid_pred, {'labels': labels})
+                            loss_total = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                        outputs = grid_pred  # 用于调试打印
                     else:
                         outputs = model(seq_1d, img_2d)
-                        if epoch == 0 and train_batch_idx < 3:
-                            print(f"  [DEBUG] outputs[:2]={outputs[:2].detach().cpu().numpy()}")
-                            print(f"  [DEBUG] outputs is_nan={torch.isnan(outputs).any().item()}")
                         if task == 'segmentation':
                             loss_total = criterion(outputs, labels)
                         elif task == 'multitask':
@@ -1241,12 +1261,10 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                     loss_str = f"loss={loss_total.item():.6f}"
                     if torch.isnan(loss_total).item():
                         loss_str += " [NaN!]"
-                        # 额外调试：检查模型输出
+                        # NaN 调试：检查模型输出
                         print(f"  [DEBUG] Train Batch {train_batch_idx}: {loss_str}")
                         print(f"    outputs[:3]={outputs[:3].detach().cpu().numpy()}")
                         print(f"    labels[:3]={labels[:3].cpu().numpy()}")
-                    else:
-                        print(f"  [DEBUG] Train Batch {train_batch_idx}: {loss_str}")
 
         except RuntimeError as e:
             if 'out of memory' in str(e).lower():
@@ -1275,26 +1293,35 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 # 检查是否为新变体
                 is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
                 if is_new_variant:
-                    outputs, global_density = model(seq_1d, img_2d)
-                    if epoch == 0 and len(all_preds) < 3:
-                        print(f"  [DEBUG] Val {variant_key} outputs[:2]={outputs[:2].detach().cpu().numpy()}")
-                        print(f"  [DEBUG] Val global_density[:2]={global_density[:2].detach().cpu().numpy()}")
+                    model_output, global_density = model(seq_1d, img_2d)
                     if variant_key in ['swin_yolo', 'vit_yolo']:
-                        assigned_target, pos_mask = assigner(labels)
-                        loss_total = criterion(outputs, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                        # 训练模式：model_output 是 (B, 256, 6)，直接计算损失
+                        # 推理模式：model_output 是 (B, 6)，需要适配后计算损失
+                        if model_output.ndim == 3:
+                            # 训练模式（完整网格预测）
+                            grid_pred = model_output
+                            assigned_target, pos_mask = assigner(labels)
+                            loss_total = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                        else:
+                            # 推理模式：将 (B, 6) 转为 (B, 256, 6) 以计算损失
+                            B_v = model_output.size(0)
+                            grid_pred = model_output.unsqueeze(1).expand(-1, 256, -1)  # (B, 256, 6)
+                            # 分配目标：每个网格都分配完整目标
+                            assigned_target, pos_mask = assigner(labels)
+                            # 所有网格都标记为正样本（推理模式简化处理）
+                            pos_mask = torch.ones(B_v, 256, dtype=torch.bool, device=model_output.device)
+                            loss_total = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                         # 收集预测用于指标计算（取global_density）
                         all_preds.append(global_density.cpu())
                         all_targets.append(labels[:, 5:6].cpu())
                     else:  # detr
-                        indices = matcher(outputs, {'labels': labels})
-                        loss_total = criterion(outputs, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                        # DETR eval 模式：model_output 是 (B, 6)，跳过损失计算
+                        # 仅用 global_density 收集指标
+                        loss_total = torch.tensor(0.0, device=model_output.device)
                         all_preds.append(global_density.cpu())
                         all_targets.append(labels[:, 5:6].cpu())
                 else:
                     outputs = model(seq_1d, img_2d)
-                    if epoch == 0 and len(all_preds) < 3:
-                        print(f"  [DEBUG] Val outputs[:2]={outputs[:2].detach().cpu().numpy()}")
-                        print(f"  [DEBUG] Val outputs is_nan={torch.isnan(outputs).any().item()}")
                     # 根据任务类型计算损失
                     if task == 'segmentation':
                         loss_total = criterion(outputs, labels)
@@ -1520,6 +1547,9 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None):
     display_name = VARIANT_DISPLAY_NAMES.get(variant_key, variant_key)
     print_info(f"训练变体: {display_name} ({variant_key})")
 
+    # 将 variant_key 加入 config（供 train_model 和 estimate_training_time 使用）
+    config['variant'] = variant_key
+
     # 检查点命名包含变体、架构信息和 predict_offset
     predict_offset = config.get('predict_offset', 0)
     backbone_2d = config.get('backbone_2d', 'resnet18')
@@ -1554,8 +1584,17 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None):
                 dropout=config['dropout'],
                 task=task
             )
+        elif variant_key in ['swin_yolo', 'vit_yolo', 'detr']:
+            # YOLO/DETR 变体：传递 image_size 参数
+            return ModelClass(
+                seq_len=config.get('feature_len', 300),
+                image_channels=2,
+                image_size=config['image_size'],
+                pretrained_2d=True,
+                dropout=config['dropout']
+            )
         else:
-            # 消融变体：使用对应的简化模型
+            # 其他消融变体：使用默认参数
             return ModelClass(dropout=config['dropout'])
 
     # ========== 强化检查点加载逻辑 ==========
