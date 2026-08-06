@@ -1212,7 +1212,8 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
                                   remove_contours=False,
                                   disabled_batches=None,
                                   task='detection',
-                                  triple_channel=False):
+                                  triple_channel=False,
+                                  cutmix_prob=0.0):
     """
     创建多批次数据加载器
 
@@ -1230,11 +1231,13 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
         disabled_batches: 禁用的批次列表
         task: 任务模式，'detection' / 'segmentation' / 'multitask'
         triple_channel: 是否启用三通道时序输入（初始温度 + 当前温度 + 温度变化率）
+        cutmix_prob: ThermalCutMix 增强概率（默认0关闭）
 
     Returns:
         tuple: (train_loader, test_loader)
     """
     from torch.utils.data import DataLoader
+    import random
 
     # 自动获取数据目录
     if data_roots is None:
@@ -1250,6 +1253,8 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
     print_info(f"数据目录: {[os.path.basename(p) for p in data_roots]}")
     if triple_channel:
         print_info("启用三通道时序输入: [初始温度, 当前温度, 温度变化率]")
+    if cutmix_prob > 0:
+        print_info(f"启用 ThermalCutMix 增强: prob={cutmix_prob}")
 
     # 创建数据集
     train_dataset = MultiBatchCollateDataset(
@@ -1283,12 +1288,51 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
     )
 
     # 创建DataLoader
+    def collate_fn_with_cutmix(batch):
+        """collate_fn 支持 ThermalCutMix 增强"""
+        seq_1d_list, img_2d_list, labels_list = zip(*batch)
+
+        # ThermalCutMix: 批量级别混合（仅训练集，物理安全版）
+        cutmix_applied = [False] * len(batch)
+        if cutmix_prob > 0 and augment and len(batch) >= 2 and random.random() < cutmix_prob:
+            # 随机选择一对样本
+            idx1, idx2 = random.sample(range(len(batch)), 2)
+            lambda_ = random.betavariate(1.0, 1.0)
+
+            # 仅混合温度通道（物理安全）
+            img1 = img_2d_list[idx1]
+            img2 = img_2d_list[idx2]
+
+            mixed_img = img1.clone()
+            # 温度通道混合
+            mixed_img = mixed_img.copy()
+            mixed_img[0] = img1[0] * lambda_ + img2[0] * (1 - lambda_)
+            # 应力通道保持不变
+
+            # 标签线性插值
+            mixed_labels = lambda_ * labels_list[idx1] + (1 - lambda_) * labels_list[idx2]
+
+            # 替换其中一个样本
+            img_2d_list = list(img_2d_list)
+            labels_list = list(labels_list)
+            img_2d_list[idx1] = mixed_img
+            labels_list[idx1] = mixed_labels
+            cutmix_applied[idx1] = True
+
+        # 堆叠
+        seq_1d = torch.stack(seq_1d_list)
+        img_2d = torch.stack(img_2d_list)
+        labels = torch.stack(labels_list)
+
+        return (seq_1d, img_2d), labels
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=True,
+        collate_fn=collate_fn_with_cutmix
     )
 
     test_loader = DataLoader(

@@ -161,8 +161,24 @@ class BackboneWithAttention(nn.Module):
         super().__init__()
         self.backbone = backbone
 
-        # 获取骨干网络的输出通道数
-        out_channels = getattr(backbone, 'feature_dim', 512)
+        # 安全获取通道数（兼容不同骨干网络）
+        if hasattr(backbone, 'out_channels'):
+            channels = backbone.out_channels
+        elif hasattr(backbone, 'feature_dim'):
+            channels = backbone.feature_dim
+        else:
+            # 如果都没有，尝试动态推导
+            import torch
+            with torch.no_grad():
+                try:
+                    dummy = torch.randn(1, 2, 256, 256)
+                    channels = backbone(dummy).size(1)
+                    print(f"[提示] 未找到 out_channels/feature_dim，动态推导通道数: {channels}")
+                except Exception as e:
+                    channels = 512  # 回退到默认值
+                    print(f"[警告] 无法推导通道数，使用默认值: {channels} ({e})")
+
+        out_channels = channels
 
         if attention_type == 'se':
             self.attention = SEBlock(channels=out_channels, reduction=reduction)
@@ -886,6 +902,81 @@ class CrossAttentionFusion(nn.Module):
 
 
 # =============================================================================
+# 门控多模态融合
+# =============================================================================
+
+class GatedMultimodalFusion(nn.Module):
+    """门控多模态融合 - 温度/应力分治策略
+
+    将2D特征按比例拆分为温度和应力两个分支，通过注意力加权后由时序特征门控融合
+
+    ⚠️ 注意：此实现假设2D特征是按"温度、应力"顺序排列的。
+    对于非标准骨干网络，建议使用 channel_split 参数指定具体拆分位置。
+    """
+    def __init__(self, dim_2d=512, dim_1d=64, split_ratio=0.5, channel_split=None):
+        super().__init__()
+        # 允许用户指定具体的拆分位置（优先级高于 split_ratio）
+        if channel_split is not None:
+            self.temp_channels = channel_split
+        else:
+            self.temp_channels = int(dim_2d * split_ratio)
+        self.stress_channels = dim_2d - self.temp_channels
+
+        # 温度分支注意力
+        self.temp_attn = nn.Sequential(
+            nn.Linear(self.temp_channels, max(1, self.temp_channels // 4)),
+            nn.ReLU(),
+            nn.Linear(max(1, self.temp_channels // 4), self.temp_channels),
+            nn.Sigmoid()
+        )
+
+        # 应力分支注意力
+        self.stress_attn = nn.Sequential(
+            nn.Linear(self.stress_channels, max(1, self.stress_channels // 4)),
+            nn.ReLU(),
+            nn.Linear(max(1, self.stress_channels // 4), self.stress_channels),
+            nn.Sigmoid()
+        )
+
+        # 门控网络
+        self.gate = nn.Sequential(
+            nn.Linear(dim_1d, max(1, dim_1d // 2)),
+            nn.ReLU(),
+            nn.Linear(max(1, dim_1d // 2), 2),
+            nn.Softmax(dim=-1)
+        )
+
+        # 输出投影
+        self.output_proj = nn.Linear(dim_2d, dim_2d)
+
+    def forward(self, feat_2d, feat_1d):
+        """
+        Args:
+            feat_2d: 2D图像特征 (B, dim_2d)
+            feat_1d: 1D时序特征 (B, dim_1d)
+        Returns:
+            融合后的特征 (B, dim_2d)
+        """
+        # 拆分温度和应力特征
+        temp_feat = feat_2d[:, :self.temp_channels]
+        stress_feat = feat_2d[:, self.temp_channels:]
+
+        # 计算注意力权重
+        temp_weight = self.temp_attn(temp_feat)
+        stress_weight = self.stress_attn(stress_feat)
+
+        # 门控权重
+        gate = self.gate(feat_1d)  # (B, 2)
+
+        # 加权融合
+        temp_out = temp_feat * temp_weight * gate[:, 0:1]
+        stress_out = stress_feat * stress_weight * gate[:, 1:2]
+
+        output = torch.cat([temp_out, stress_out], dim=-1)
+        return self.output_proj(output)
+
+
+# =============================================================================
 # 多任务输出头
 # =============================================================================
 
@@ -1088,7 +1179,8 @@ class PETSNetMultimodal(nn.Module):
                  image_size=256,
                  pretrained_2d=True,
                  dropout=0.2,
-                 task='detection'):
+                 task='detection',
+                 fusion='cross_attn'):
         """
         Args:
             seq_len: 1D 序列长度（默认 300）
@@ -1097,12 +1189,14 @@ class PETSNetMultimodal(nn.Module):
             pretrained_2d: 2D 分支是否使用预训练权重
             dropout: Dropout 比例
             task: 任务模式，'detection' | 'segmentation' | 'multitask'
+            fusion: 融合策略，'cross_attn' | 'gated'
         """
         super().__init__()
 
         self.seq_len = seq_len
         self.task = task
         self.image_size = image_size
+        self.fusion_type = fusion
 
         # -------------------------------------------------------------------------
         # 分支 1：2D 视觉特征提取（512 维）
@@ -1126,14 +1220,22 @@ class PETSNetMultimodal(nn.Module):
         feat_dim_1d = 64
 
         # -------------------------------------------------------------------------
-        # 融合层：Cross-Attention
+        # 融合层：根据 fusion 参数选择
         # -------------------------------------------------------------------------
-        self.cross_attention = CrossAttentionFusion(
-            dim_2d=feat_dim_2d,
-            dim_1d=feat_dim_1d,
-            num_heads=4,
-            dropout=dropout
-        )
+        if fusion == 'gated':
+            self.fusion = GatedMultimodalFusion(
+                dim_2d=feat_dim_2d,
+                dim_1d=feat_dim_1d,
+                split_ratio=0.5
+            )
+        else:
+            # 默认使用 Cross-Attention
+            self.fusion = CrossAttentionFusion(
+                dim_2d=feat_dim_2d,
+                dim_1d=feat_dim_1d,
+                num_heads=4,
+                dropout=dropout
+            )
         fused_dim = feat_dim_2d + feat_dim_1d  # 512 + 64 = 576
 
         # -------------------------------------------------------------------------
@@ -1214,8 +1316,8 @@ class PETSNetMultimodal(nn.Module):
         # 分支 2：1D 时序特征
         feat_1d = self.branch_1d(x_1d)          # (batch, 64)
 
-        # 融合：Cross-Attention
-        fused = self.cross_attention(feat_2d, feat_1d)  # (batch, 576)
+        # 融合：根据 fusion 类型选择
+        fused = self.fusion(feat_2d, feat_1d)  # (batch, 576)
 
         if self.task == 'detection':
             # 检测任务：输出 6 维向量

@@ -602,7 +602,8 @@ def eval_checkpoint(checkpoint_path, device, image_size=None):
             image_channels=2,
             image_size=image_size,
             pretrained_2d=True,
-            task=task
+            task=task,
+            fusion=saved_config.get('fusion', 'cross_attn')
         )
     elif variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']:
         # YOLO/DETR 变体
@@ -1587,7 +1588,8 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None):
                 image_size=config['image_size'],
                 pretrained_2d=True,
                 dropout=config['dropout'],
-                task=task
+                task=task,
+                fusion=config.get('fusion', 'cross_attn')
             )
         elif variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']:
             # YOLO/DETR 变体：传递 image_size 参数
@@ -1667,6 +1669,16 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None):
 
     model = model.to(device)
 
+    # 坐标注意力集成
+    if args.use_coord_attn and hasattr(model, 'branch_2d'):
+        from models.pe_tsnet_multimodal import BackboneWithAttention
+        model.branch_2d = BackboneWithAttention(
+            model.branch_2d,
+            attention_type='coord',
+            reduction=16
+        )
+        print_info(f"[OK] 坐标注意力已启用")
+
     # 加载数据
     print_info("加载数据集...")
     train_loader, test_loader = create_multibatch_dataloaders(
@@ -1680,7 +1692,8 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None):
         remove_contours=config.get('remove_contours', False),
         disabled_batches=config.get('disabled_batches', []),
         task=task,
-        triple_channel=config.get('triple_channel', False)
+        triple_channel=config.get('triple_channel', False),
+        cutmix_prob=config.get('aug_cutmix_prob', 0.0)
     )
 
     # 验证数据集非空
@@ -1744,8 +1757,12 @@ def main():
                         choices=['cnn_attn', 'transformer', 'dlinear'],
                         help='1D时序骨干网络（默认cnn_attn）')
     parser.add_argument('--fusion', type=str, default='cross_attn',
-                        choices=['cross_attn', 'concat', 'adaptive'],
+                        choices=['cross_attn', 'gated'],
                         help='多模态融合策略（默认cross_attn）')
+
+    # 坐标注意力
+    parser.add_argument('--use_coord_attn', action='store_true', default=False,
+                        help='使用坐标注意力增强空间位置感知')
 
     # 数据处理配置
     parser.add_argument('--feature_len', type=int, default=300,
@@ -1803,6 +1820,10 @@ def main():
     parser.add_argument('--triple_channel', action='store_true', default=False,
                         help='启用三通道时序输入：初始温度 + 当前温度 + 温度变化率')
 
+    # ThermalCutMix 数据增强
+    parser.add_argument('--aug_cutmix_prob', type=float, default=0.0,
+                        help='ThermalCutMix 增强概率（默认0关闭，仅对温度通道混合）')
+
     # 评估
     parser.add_argument('--eval_output', type=str, default=None, help='评估结果保存路径')
 
@@ -1858,6 +1879,7 @@ def main():
         'disabled_batches': args.disable_batch,
         'task': args.task,
         'triple_channel': args.triple_channel,
+        'aug_cutmix_prob': args.aug_cutmix_prob,
         # 检查点控制
         'force_retrain': args.force_retrain,
         'resume': args.resume,

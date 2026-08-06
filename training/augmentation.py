@@ -130,7 +130,8 @@ class ThermalCutMix:
 
         # 如果掩码全0或全1，使用随机掩码
         if mask.sum() == 0 or mask.sum() == mask.numel():
-            mask = torch.rand_like(temp_map) > lambda_
+            # BUG FIX: 原来引用了未定义的 lambda_，改为使用随机数
+            mask = (torch.rand_like(temp_map) > 0.5).float()
 
         return mask
 
