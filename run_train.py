@@ -1450,9 +1450,9 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                     else:
                         # detection: outputs (batch, 6), labels (batch, 6)
                         loss_total, _ = criterion(outputs, labels)
-                        # 收集预测用于指标计算
-                        all_preds.append(outputs[:, 5:6].cpu())
-                        all_targets.append(labels[:, 5:6].cpu())
+                        # 收集完整 6 维用于指标计算
+                        all_preds.append(outputs.cpu())
+                        all_targets.append(labels[:, :6].cpu())
 
                 val_loss += loss_total.item()
 

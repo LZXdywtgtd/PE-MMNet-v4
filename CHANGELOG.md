@@ -6,6 +6,38 @@
 
 ---
 
+## [v4.6.4] - 2026-08-07
+
+### 修复：全链路数据流审计 P1 Bug
+
+#### train_model eval 循环维度修复
+
+**问题**：`run_train.py` 第 1454-1455 行，resnet18 等旧变体在 eval 循环中只收集 `outputs[:, 5:6]` → `(B, 1)`，但后续用 `preds[:, 5]` 索引会导致 IndexError。
+
+**修复**：收集完整 6 维输出 `outputs.cpu()` 而非仅密度列。
+
+**影响范围**：仅影响训练时 eval 循环日志打印。训练后的完整评估走 `evaluate_model`（已正确处理），不受影响。
+
+### 新增：全变体数据流审计文档
+
+完成 5 个模型变体的全链路审计（配置解析 → 模型构建 → 数据加载 → 损失计算 → 评估），归档于 `docs/archived/2026-08-07-1/`：
+
+- `resnet18_audit.md` — PETSNetMultimodal 全链路审计
+- `swin_yolo_audit.md` — SwinYOLOFPN 全链路审计
+- `vit_yolo_audit.md` — ViTYOLOFPN 全链路审计
+- `detr_audit.md` — DETRStyle 全链路审计（含 Hungarian 匹配训练链路）
+- `swin_yolo_patchtst_audit.md` — SwinYOLOFPNWithPatchTST 全链路审计
+
+### 文档体系重构
+
+- 文档重新分类整理至 `docs/` 下 5 个子目录：`user_guides/`、`dev_reference/`、`architecture/`、`experiment_reports/`、`collaboration/`
+- 审计报告归档至 `docs/archived/YYYY-MM-DD-N/` 时间归档文件夹
+- 合并控制台输出样式至开发人员文档
+- `team_configs.txt` 内容迁移至 `tasks/examples.json`
+- README.md 精简，文档链接更新为新路径
+
+---
+
 ## [v4.6.3] - 2026-08-06
 
 ### 修复：模型代码全面审计

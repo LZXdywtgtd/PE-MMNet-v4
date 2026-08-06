@@ -14,14 +14,20 @@
 from data.dataset_multimodal import create_multibatch_dataloaders
 
 train_loader, test_loader = create_multibatch_dataloaders(
-    data_roots=None,           # list[str]: 数据目录（None自动扫描config.json）
-    batch_size=16,             # int: 批次大小
-    image_size=512,            # int: 图像尺寸
-    seq_len=300,              # int: 序列长度
-    augment=True,             # bool: 数据增强
-    predict_offset=0,          # int: 时间偏移
-    task='detection',         # str: 'detection', 'segmentation', 'multitask'
-    triple_channel=False       # bool: 三通道时序输入
+    data_roots=None,              # list[str]: 数据目录（None自动扫描config.json）
+    batch_size=16,                # int: 批次大小
+    image_size=256,               # int: 图像尺寸（默认256）
+    seq_len=300,                  # int: 序列长度
+    num_workers=0,                # int: 数据加载线程数
+    train_ratio=0.8,              # float: 训练集比例
+    augment=True,                 # bool: 数据增强
+    predict_offset=0,             # int: 时间偏移（预测未来时刻）
+    seq_interp_mode='interpolate',# str: 序列插值模式
+    remove_contours=False,        # bool: 是否去除轮廓干扰
+    disabled_batches=None,        # list[str]: 禁用批次名列表
+    task='detection',             # str: 'detection' | 'segmentation' | 'multitask'
+    triple_channel=False,         # bool: 三通道时序输入（初始+当前+变化率）
+    cutmix_prob=0.0               # float: ThermalCutMix启用概率（默认关闭）
 )
 ```
 
@@ -52,47 +58,50 @@ from models.pe_tsnet_multimodal import PETSNetMultimodal
 model = PETSNetMultimodal(
     seq_len=300,
     image_channels=2,
-    image_size=512,
+    image_size=256,
     pretrained_2d=True,
     dropout=0.2,
     task='detection'
 )
 ```
 
-**输出**：
-- 训练模式：`(B, 6)`, `(B, 1)`
-- 推理模式：`(B, 6)`, `(B, 1)`
+**输出**：所有模式下均返回单一 `(B, 6)` 张量（检测任务）。
 
 ### 2.2 YOLO-FPN 变体 (models.pe_tsnet_yolo)
 
 ```python
-from models.pe_tsnet_yolo import SwinYOLOFPN, ViTYOLOFPN
+from models.pe_tsnet_yolo import SwinYOLOFPN, ViTYOLOFPN, SwinYOLOFPNWithPatchTST
 
 # Swin-YOLO-FPN
 model = SwinYOLOFPN(
     seq_len=300,
     image_channels=2,
-    image_size=512,
-    grid_size=16,
-    num_queries=256,
+    image_size=256,
     pretrained_2d=True,
     dropout=0.2
 )
 
-# ViT-YOLO-FPN
+# ViT-YOLO-FPN（grid_size固定16，image_size参数不影响网格数）
 model = ViTYOLOFPN(
     seq_len=300,
     image_channels=2,
-    image_size=512,
-    grid_size=16,
-    num_queries=256,
+    image_size=256,
+    pretrained_2d=True,
+    dropout=0.2
+)
+
+# Swin-YOLO-FPN with PatchTST（1D骨干使用PatchTST替代TemporalFeatureExtractor）
+model = SwinYOLOFPNWithPatchTST(
+    seq_len=300,
+    image_channels=2,
+    image_size=256,
     pretrained_2d=True,
     dropout=0.2
 )
 ```
 
 **输出**：
-- 训练模式：`(B, 256, 6)`, `(B, 1)`
+- 训练模式：`(B, G², 6)`, `(B, 1)` （Swin/PatchTST 动态G²，ViT固定256网格）
 - 推理模式：`(B, 6)`, `(B, 1)`
 
 ### 2.3 DETR 风格变体 (models.pe_tsnet_detr)
@@ -115,7 +124,7 @@ model = DETRStyle(
 
 **输出**：
 - 训练模式：`(B, 100, 6)`, `(B, 1)`
-- 推理模式：`(B, 6)`, `(B, 1)`
+- 推理模式：`(B, 6)`, `(B, 1)` （经 Hungarian匹配→query_proj→fusion→output_head）
 
 ### 2.4 骨干网络 (models.pe_tsnet_multimodal)
 
@@ -130,7 +139,7 @@ backbone_2d = ResNet18Backbone2D(
     in_channels=2,
     pretrained=True
 )
-backbone_2d.set_spatial_output(True)  # 启用空间特征输出
+backbone_2d.set_spatial_output(True)  # 启用空间特征输出（DETR必须）
 
 # 1D 特征提取器
 backbone_1d = TemporalFeatureExtractor(
@@ -144,19 +153,23 @@ backbone_1d = TemporalFeatureExtractor(
 ### 2.5 融合模块 (models.pe_tsnet_multimodal)
 
 ```python
-from models.pe_tsnet_multimodal import CrossAttentionFusion, GatedMultimodalFusion, AdaptiveFusion
+from models.pe_tsnet_multimodal import CrossAttentionFusion, GatedMultimodalFusion
 
 # 交叉注意力融合
+# dim_2d 取决于使用场景：
+#   - resnet18 变体：dim_2d=512
+#   - YOLO 变体（推理分支）：dim_2d=6
+#   - DETR 变体（推理分支）：dim_2d=128（经 query_proj 投影后）
 fusion = CrossAttentionFusion(
-    dim_2d=6,   # 输出维度（来自模型预测）
-    dim_1d=64,  # 1D特征维度
+    dim_2d=6,
+    dim_1d=64,
     num_heads=4
 )
 
 out = fusion(query_feat, feat_1d)
-# query_feat: (B, 6) 或 (B, seq, 6)
+# query_feat: (B, dim_2d)
 # feat_1d: (B, dim_1d)
-# out: (B, dim_1d) 或 (B, seq, dim_1d)
+# out: (B, dim_2d + dim_1d)
 ```
 
 ### 2.6 注意力模块 (models.pe_tsnet_multimodal)
@@ -189,7 +202,7 @@ from models.pe_tsnet_patchtst import PatchTST1D, PatchTSTWithRate
 # 标准 PatchTST
 model = PatchTST1D(
     seq_len=300,
-    patch_size=10,
+    patch_size=10,    # seq_len/patch_size=30 patches
     d_model=64,
     nhead=4,
     num_layers=2,
@@ -204,26 +217,21 @@ model = PatchTSTWithRate(
 )
 ```
 
-### 2.8 门控融合模块 (models.pe_tsnet_multimodal)
+> PatchTST1D 输出维度与 TemporalFeatureExtractor 完全一致：(B, 64)，可无缝替换。
 
-> ⚠️ 注意：`GatedMultimodalFusion` 和 `AdaptiveFusion` 的实际实现位于 `models.pe_tsnet_multimodal`。
-> `models.pe_tsnet_fusion` 中有历史版本但未被任何代码引用。
+### 2.8 掩膜解码器 (models.pe_tsnet_multimodal)
 
 ```python
-from models.pe_tsnet_multimodal import GatedMultimodalFusion, AdaptiveFusion
+from models.pe_tsnet_multimodal import MaskDecoder
 
-# 门控多模态融合（温度/应力分治策略）
-fusion = GatedMultimodalFusion(
-    dim_2d=512,
-    dim_1d=64,
-    split_ratio=0.5,
-    num_heads=4
+decoder = MaskDecoder(
+    in_channels=576,   # 融合特征维度
+    hidden_dim=128,
+    target_size=256
 )
-
-out = fusion(feat_2d, feat_1d)
-# feat_2d: (B, dim_2d)
-# feat_1d: (B, dim_1d)
-# out: (B, dim_1d)
+mask = decoder(fused_feat)
+# fused_feat: (B, 576) 融合特征
+# mask: (B, 1, 256, 256) 二值掩膜
 ```
 
 ---
@@ -241,13 +249,14 @@ criterion = MultimodalCrackLoss(
     lambda_mse_density=1.0,
     lambda_mono=0.1,
     lambda_loc=1.0,
-    lambda_conf=1.0
+    lambda_conf=1.0,
+    use_ciou=False     # bool: 是否使用CIoU替代DIoU（默认False）
 )
 ```
 
 ### YOLOLoss
 
-YOLO检测损失（用于 swin_yolo, vit_yolo）。
+YOLO检测损失（用于 swin_yolo, vit_yolo, swin_yolo_patchtst）。
 
 ```python
 from training.mono_loss import YOLOLoss, YOLOTargetAssigner
@@ -262,14 +271,14 @@ criterion = YOLOLoss(
 
 ### DETRLoss
 
-DETR检测损失（用于 detr）。
+DETR检测损失（用于 detr）。包含 Hungarian Loss + 可选 Supervise Loss（0.5×权重）。
 
 ```python
 from training.mono_loss import DETRLoss, HungarianMatcher
 
 matcher = HungarianMatcher()
 criterion = DETRLoss(
-    matcher=matcher,
+    matcher=matcher,       # HungarianMatcher 实例（必传）
     lambda_bbox=1.0,
     lambda_conf=1.0,
     lambda_mono=0.1
@@ -291,22 +300,30 @@ criterion = SegmentationLoss(
 
 ### DensityConsistencyLoss
 
-密度一致性损失（邻域平滑约束）。
+邻域平滑约束（仅正样本网格参与）。
 
 ```python
-from training.mono_loss import DensityConsistencyLoss, CombinedDensityLoss
+from training.mono_loss import DensityConsistencyLoss
 
-loss = DensityConsistencyLoss(
+loss_fn = DensityConsistencyLoss(
+    grid_size=16,             # 网格尺寸
+    neighbor_range=1,         # 邻域范围（1=3×3邻域）
+    lambda_consistency=0.5    # 一致性损失权重
+)
+```
+
+### CombinedDensityLoss
+
+组合密度损失（MSE + 一致性）。
+
+```python
+from training.mono_loss import CombinedDensityLoss
+
+criterion = CombinedDensityLoss(
     grid_size=16,
     neighbor_range=1,
-    lambda_consistency=0.5
-)
-
-# 组合损失
-criterion = CombinedDensityLoss(
     lambda_mse=1.0,
-    lambda_consistency=0.5,
-    grid_size=16
+    lambda_consistency=0.5
 )
 ```
 
@@ -319,9 +336,9 @@ criterion = CombinedDensityLoss(
 物理安全版CutMix增强（仅混合温度通道）。
 
 ```python
-from training.augmentation import ThermalCutMix, RandomNoise, RandomFlip
+from training.augmentation import ThermalCutMix, RandomNoise, RandomFlip, CompositeTransform
 
-cutmix = ThermalCutMix(alpha=1.0, prob=0.3)
+cutmix = ThermalCutMix(alpha=1.0, prob=0.0)  # 默认关闭（prob=0.0）
 img_aug, labels_aug = cutmix(img1, img2, labels1, labels2)
 
 # img: (2, H, W) - 通道0=温度，通道1=应力
@@ -333,8 +350,9 @@ img_aug, labels_aug = cutmix(img1, img2, labels1, labels2)
 随机噪声增强。
 
 ```python
-noise = RandomNoise(prob=0.5, scale=0.1)
+noise = RandomNoise(noise_level=0.01, prob=0.5)
 img_aug = noise(img)
+# noise_level: 噪声水平（相对于[0,1]范围的百分比）
 ```
 
 ### RandomFlip
@@ -342,8 +360,23 @@ img_aug = noise(img)
 随机翻转增强。
 
 ```python
-flip = RandomFlip(prob=0.5, mode='horizontal')
+flip = RandomFlip(h_prob=0.5, v_prob=0.0)
 img_aug = flip(img)
+# h_prob: 水平翻转概率
+# v_prob: 垂直翻转概率
+```
+
+### CompositeTransform
+
+组合多个增强变换。
+
+```python
+transform = CompositeTransform([
+    ThermalCutMix(alpha=1.0, prob=0.2),
+    RandomNoise(noise_level=0.01, prob=0.3),
+    RandomFlip(h_prob=0.5),
+])
+img_aug, labels_aug = transform(img, labels)
 ```
 
 ---
@@ -382,10 +415,16 @@ from run_train import evaluate_model
 metrics = evaluate_model(
     model,
     device,
-    data_roots=None,
-    task='detection',
-    image_size=512,
-    variant_key='resnet18'  # 可选：模型变体
+    data_roots=None,               # 可选：数据目录列表
+    predict_offset=0,              # 时间偏移
+    seq_len=300,                   # 序列长度
+    seq_interp_mode='interpolate', # 插值模式
+    remove_contours=False,         # 去除轮廓
+    disabled_batches=None,         # 禁用批次
+    task='detection',              # 任务类型
+    image_size=256,                # 图像尺寸
+    variant_key=None,              # 模型变体标识
+    triple_channel=False           # 三通道输入
 )
 
 # 返回:
@@ -394,20 +433,51 @@ metrics = evaluate_model(
 
 ### estimate_training_time
 
-动态训练时间估算（训练前测量）。
+动态训练时间估算（训练前测量2个epoch）。
 
 ```python
 from run_train import estimate_training_time
 
 avg_time, total_minutes = estimate_training_time(
     model, train_loader, test_loader,
-    criterion, optimizer, device, config
+    criterion, optimizer, device, config,
+    scheduler=None   # 可选：学习率调度器（用于估算后恢复）
 )
 
 # 返回:
 # - avg_time: float, 平均每epoch秒数
 # - total_minutes: float, 预估总时间（分钟）
 # 自动保存/恢复模型状态，不影响训练
+```
+
+### staged_training
+
+分阶段训练（先短序列预训练，再长序列微调）。
+
+```python
+from run_train import staged_training
+
+staged_training(
+    variant_key='resnet18',
+    config={},
+    device='cuda',
+    data_roots=None,
+    task_id=None
+)
+```
+
+### eval_checkpoint
+
+评估检查点文件。
+
+```python
+from run_train import eval_checkpoint
+
+metrics = eval_checkpoint(
+    checkpoint_path='checkpoints/xxx_best.pt',
+    device='cuda',
+    image_size=None   # 可选：指定图像尺寸
+)
 ```
 
 ### freeze_model_backbone
@@ -421,7 +491,7 @@ model = freeze_model_backbone(
     model,
     freeze_2d=True,    # 冻结2D骨干
     freeze_1d=False,   # 保持1D骨干可训练
-    freeze_names=None  # 可选：额外要冻结的参数名
+    freeze_names=None  # 可选：额外要冻结的参数名列表
 )
 ```
 
@@ -477,7 +547,7 @@ cmd = build_command([
 ```python
 from launcher import export_team_configs
 
-export_team_configs('team_configs.txt')
+export_team_configs(filepath='team_configs.txt')  # 默认值
 ```
 
 ### validate_args
@@ -488,6 +558,7 @@ export_team_configs('team_configs.txt')
 from launcher import validate_args
 
 valid, errors = validate_args(['--variant', 'resnet18', '--epochs', '100'])
+# valid: bool, errors: list[str]
 ```
 
 ---
@@ -503,7 +574,7 @@ from team_train import log_task_execution
 
 log_task_execution(
     task_id='BASELINE_1',
-    status='completed',           # 'started', 'completed', 'failed', 'skipped'
+    status='completed',           # 'started' | 'completed' | 'failed' | 'skipped'
     duration_seconds=43200,       # 可选：执行时长
     error=None                   # 可选：错误信息
 )
@@ -530,7 +601,7 @@ task_id = parse_task_id_from_filename('checkpoint_BASELINE_1_best.pt', all_tasks
 from team_train import get_hardware_level
 
 level, gpu_mem = get_hardware_level()
-# level: 'L1', 'L1+', 'L2', 'L3'
+# level: 'L1' | 'L1+' | 'L2' | 'L2+' | 'L3'
 # gpu_mem: float, 显存大小(GB)
 ```
 
@@ -587,20 +658,26 @@ batches = get_data_batches()
 
 ## 9. 控制台输出 (utils.console)
 
+| 函数 | 颜色 | 用途 |
+|------|------|------|
+| `print_title(text, width)` | 白色加粗+上下分隔线 | 大段章节标题 |
+| `print_section(text, width)` | 白色加粗无分隔线 | 子标题 |
+| `print_result(key, value, fmt, width, unit)` | 青色高亮值 | 关键指标、评估结果 |
+| `print_results_table(metrics, width)` | 青色高亮值 | 指标表格 |
+| `print_info(text, indent)` | 灰色 | 普通日志 |
+| `print_warning(text)` | 黄色 | 警告提示 |
+| `print_error(text)` | 红色 | 错误信息 |
+| `print_success(text)` | 绿色 | 成功提示 |
+| `print_progress(current, total, text)` | 灰色 | 进度信息 `[4/5] 开始训练` |
+| `print_metric_row(key, value, fmt, width)` | 灰色 | 表格指标行 |
+| `print_divider(char, width, color)` | 可选颜色 | 自定义分隔线 |
+| `print_header(text, width)` | 青色+上下 === 分隔线 | 主标题 |
+
 ```python
 from utils.console import (
-    print_title,       # 白色加粗标题
-    print_section,     # 分节标题
-    print_result,      # 青色关键指标
-    print_info,        # 灰色普通信息
-    print_warning,     # 黄色警告
-    print_error,       # 红色错误
-    print_success,     # 绿色成功
-    print_progress,    # 进度条
-    print_header,      # 分隔线标题
-    print_divider,     # 分隔线
-    print_results_table, # 结果表格
-    print_metric_row   # 指标行
+    print_title, print_section, print_result, print_results_table,
+    print_info, print_warning, print_error, print_success,
+    print_progress, print_metric_row, print_divider, print_header
 )
 
 print_title("开始训练...")
@@ -608,32 +685,46 @@ print_result("R2", 0.9399)
 print_warning("显存不足")
 print_error("训练失败")
 print_success("训练完成")
+print_divider(char='=', width=60)
+print_header("PE-MMNet v4")
 ```
 
 ---
 
-## 10. 模型创建 (models.pe_tsnet_multimodal)
+## 10. 模型工厂 (models.pe_tsnet_multimodal)
 
 ### create_model
 
-统一模型创建接口。
+统一模型工厂函数（支持 ablation 变体）。
 
 ```python
 from models.pe_tsnet_multimodal import create_model
 
 model = create_model(
-    variant_key='resnet18',  # 变体名称
-    config={'seq_len': 300, 'image_size': 512}
+    backbone_2d='resnet18',    # 'resnet18' | 'vit_small'
+    backbone_1d='cnn_attn',    # 'cnn_attn' | 'transformer' | 'dlinear'
+    fusion='cross_attn',       # 'cross_attn' | 'concat' | 'adaptive'
+    seq_len=300,
+    dropout=0.2,
+    pretrained_2d=True
 )
 ```
 
+> 注意：`create_model` 是 ablation 实验用工厂函数，不对应任何 `run_train.py` 中的 `variant_key`。
+
 ### get_arch_specific_config
 
-获取架构特定配置。
+根据架构自动配置学习率和 dropout。
 
 ```python
 from models.pe_tsnet_multimodal import get_arch_specific_config
 
-config = get_arch_specific_config('swin_yolo')
-# 返回: dict，包含变体特定的默认参数
+config = get_arch_specific_config(
+    backbone_2d='resnet18',
+    backbone_1d='cnn_attn',
+    args_lr=None,     # 可选：命令行传入学习率
+    args_dropout=None # 可选：命令行传入dropout
+)
+# 返回: dict {'lr': float, 'dropout': float}
+# 默认 lr=1e-3，ViT/Swin 架构自动降为 1e-4
 ```
