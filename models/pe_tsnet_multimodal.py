@@ -952,8 +952,8 @@ class GatedMultimodalFusion(nn.Module):
             nn.Softmax(dim=-1)
         )
 
-        # 输出投影
-        self.output_proj = nn.Linear(dim_2d, dim_2d)
+        # 输出投影（支持拼接 1D 特征后的 dim_2d + dim_1d = 576 维）
+        self.output_proj = nn.Linear(dim_2d + dim_1d, dim_2d + dim_1d)
 
     def forward(self, feat_2d, feat_1d):
         """
@@ -961,7 +961,7 @@ class GatedMultimodalFusion(nn.Module):
             feat_2d: 2D图像特征 (B, dim_2d)
             feat_1d: 1D时序特征 (B, dim_1d)
         Returns:
-            融合后的特征 (B, dim_2d)
+            融合后的特征 (B, dim_2d + dim_1d) = (B, 576)
         """
         # 拆分温度和应力特征
         temp_feat = feat_2d[:, :self.temp_channels]
@@ -978,8 +978,11 @@ class GatedMultimodalFusion(nn.Module):
         temp_out = temp_feat * temp_weight * gate[:, 0:1]
         stress_out = stress_feat * stress_weight * gate[:, 1:2]
 
-        output = torch.cat([temp_out, stress_out], dim=-1)
-        return self.output_proj(output)
+        # 融合温度/应力特征后拼接 1D 特征，再通过输出投影
+        fused = torch.cat([temp_out, stress_out, feat_1d], dim=-1)  # (B, 512+64=576)
+        output = self.output_proj(fused)  # (B, 576)
+
+        return output
 
 
 # =============================================================================
@@ -1354,7 +1357,7 @@ class PETSNetMultimodal(nn.Module):
         """
         feat_2d = self.branch_2d(x_2d)
         feat_1d = self.branch_1d(x_1d)
-        fused = self.cross_attention(feat_2d, feat_1d)
+        fused = self.fusion(feat_2d, feat_1d)
 
         return {
             'feat_2d': feat_2d,

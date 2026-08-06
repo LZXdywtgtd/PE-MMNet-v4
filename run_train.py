@@ -438,12 +438,9 @@ def evaluate_model(model, device, data_roots=None, predict_offset=0,
                 global_density = None
 
             if task == 'detection':
-                # 检测任务：使用 global_density（如果有）或 outputs 的 density 部分
-                if global_density is not None:
-                    all_preds.append(global_density.cpu())
-                else:
-                    all_preds.append(outputs[:, 5:6].cpu())
-                all_targets.append(labels[:, 5:6].cpu())
+                # 检测任务：保存完整 6 维输出（用于 mIoU 等指标计算）
+                all_preds.append(outputs.cpu().numpy())
+                all_targets.append(labels[:, :6].cpu().numpy())
             elif task == 'segmentation':
                 # 分割任务：outputs 是 (batch, 1, 256, 256)
                 # 计算 Dice Score
@@ -1046,7 +1043,12 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 lambda_conf=1.0,
                 lambda_mono=0.1
             )
-            assigner = YOLOTargetAssigner(grid_size=16, nearby_range=2)
+            # swin 变体：动态获取实际网格尺寸（Swin stride=32）
+            if variant_key in ['swin_yolo', 'swin_yolo_patchtst']:
+                actual_grid_size = model.actual_grid_size
+            else:
+                actual_grid_size = 16  # vit_yolo 输出固定 16×16
+            assigner = YOLOTargetAssigner(grid_size=actual_grid_size, nearby_range=2)
         elif variant_key == 'detr':
             matcher = HungarianMatcher()
             criterion = DETRLoss(matcher=matcher)
@@ -1341,9 +1343,8 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 # 检查是否为新变体
                 is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
                 if is_new_variant:
-                    model_output, global_density = model(seq_1d, img_2d)
                     if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
-                        # 训练模式：model_output 是 (B, 256, 6)，直接计算损失
+                        model_output, global_density = model(seq_1d, img_2d)
                         # 推理模式：model_output 是 (B, 6)，需要适配后计算损失
                         if model_output.ndim == 3:
                             # 训练模式（完整网格预测）
@@ -1351,21 +1352,28 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                             assigned_target, pos_mask = assigner(labels)
                             loss_total = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                         else:
-                            # 推理模式：将 (B, 6) 转为 (B, 256, 6) 以计算损失
+                            # 推理模式：将 (B, 6) 转为 (B, N, 6) 以计算损失
                             B_v = model_output.size(0)
-                            grid_pred = model_output.unsqueeze(1).expand(-1, 256, -1)  # (B, 256, 6)
+                            actual_num_grids = model.actual_num_grids
+                            grid_pred = model_output.unsqueeze(1).expand(-1, actual_num_grids, -1)  # (B, N, 6)
                             # 分配目标：每个网格都分配完整目标
                             assigned_target, pos_mask = assigner(labels)
                             # 所有网格都标记为正样本（推理模式简化处理）
-                            pos_mask = torch.ones(B_v, 256, dtype=torch.bool, device=model_output.device)
+                            pos_mask = torch.ones(B_v, actual_num_grids, dtype=torch.bool, device=model_output.device)
                             loss_total = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                         # 收集预测用于指标计算（取global_density）
                         all_preds.append(global_density.cpu())
                         all_targets.append(labels[:, 5:6].cpu())
                     else:  # detr
-                        # DETR eval 模式：model_output 是 (B, 6)，跳过损失计算
-                        # 仅用 global_density 收集指标
-                        loss_total = torch.tensor(0.0, device=model_output.device)
+                        # DETR eval 模式：model_output 是 (B, 6) 最佳预测
+                        # 临时切换到训练模式以获取全部 100 个 query 预测来计算有意义的验证损失
+                        model.train()
+                        detr_full_pred, global_density = model(seq_1d, img_2d)  # (B, 100, 6)
+                        indices = matcher(detr_full_pred, {'labels': labels})
+                        loss_total = criterion(detr_full_pred, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                        model.eval()  # 恢复 eval 模式
+                        # eval 模式的最佳预测用于指标收集
+                        model_output, _ = model(seq_1d, img_2d)
                         all_preds.append(global_density.cpu())
                         all_targets.append(labels[:, 5:6].cpu())
                 else:
@@ -1391,27 +1399,32 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
         if task == 'detection' and all_preds:
             import numpy as np
             from scipy import stats
-            preds = torch.cat(all_preds).numpy().flatten()
-            targets = torch.cat(all_targets).numpy().flatten()
+            # 不 flatten，保持 2D 结构以正确提取密度列
+            preds = torch.cat(all_preds).numpy()
+            targets = torch.cat(all_targets).numpy()
 
             # 调试：检查数据
             print(f"  [DEBUG] Val: preds.shape={preds.shape}, targets.shape={targets.shape}")
             print(f"  [DEBUG] preds: min={np.nanmin(preds):.4f}, max={np.nanmax(preds):.4f}, std={np.nanstd(preds):.4f}")
             print(f"  [DEBUG] targets: min={np.nanmin(targets):.4f}, max={np.nanmax(targets):.4f}, std={np.nanstd(targets):.4f}")
 
+            # 提取密度列（从 6 维中取第 6 列，索引 5）
+            pred_d = preds[:, 5].flatten()
+            target_d = targets[:, 5].flatten()
+
             # 安全的 R2 计算
-            if len(preds) > 1 and np.nanstd(preds) > 1e-8 and np.nanstd(targets) > 1e-8:
-                r2 = stats.pearsonr(preds, targets)[0] ** 2
+            if len(pred_d) > 1 and np.nanstd(pred_d) > 1e-8 and np.nanstd(target_d) > 1e-8:
+                r2 = stats.pearsonr(pred_d, target_d)[0] ** 2
                 if np.isnan(r2):
                     r2 = 0.0
             else:
                 r2 = 0.0
                 print(f"  [DEBUG] R2 计算跳过：方差过小或样本不足")
 
-            rmse = np.sqrt(np.nanmean((preds - targets) ** 2))
-            mae = np.nanmean(np.abs(preds - targets))
+            rmse = np.sqrt(np.nanmean((pred_d - target_d) ** 2))
+            mae = np.nanmean(np.abs(pred_d - target_d))
             # 计算违反率
-            diffs = np.diff(targets)
+            diffs = np.diff(target_d)
             violations = np.sum(diffs > 0) / max(len(diffs), 1)
 
             # 颜色标记：↑变好(绿) ↓变差(红) -持平(灰)

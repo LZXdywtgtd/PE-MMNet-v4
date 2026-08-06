@@ -937,9 +937,10 @@ class HungarianMatcher(nn.Module):
         out_density = outputs[..., 5:6]  # (B, num_queries, 1)
 
         tgt_labels = targets['labels']
-        num_targets = tgt_labels.shape[1] if tgt_labels.dim() > 1 else 1
-        tgt_bbox = tgt_labels[..., :4].unsqueeze(1) if tgt_labels.dim() == 2 else tgt_labels[..., :4].unsqueeze(1).unsqueeze(1)
-        tgt_density = tgt_labels[..., 5:6].unsqueeze(1) if tgt_labels.dim() == 2 else tgt_labels[..., 5:6].unsqueeze(1).unsqueeze(1)
+        # DETR 检测场景：每个样本有 1 个目标（6维向量）
+        # 注意：tgt_labels.shape[1]=6 是特征维度，不是目标数量
+        tgt_bbox = tgt_labels[..., :4].unsqueeze(1)  # (B, 1, 4)
+        tgt_density = tgt_labels[..., 5:6].unsqueeze(1)  # (B, 1, 1)
 
         # 构建成本矩阵
         # 边界框成本：L1 距离
