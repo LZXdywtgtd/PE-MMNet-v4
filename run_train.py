@@ -1002,6 +1002,35 @@ def _mark_checkpoint_complete(best_path, last_path):
         torch.save(ckpt, path)
 
 
+def _select_best_query_detr(detr_pred, labels, device):
+    """
+    使用 Hungarian 匹配选择最佳 query（训练时使用）
+
+    ⚠️ 当前仅支持单目标（单裂纹）。多裂纹扩展时需修改此函数。
+
+    Args:
+        detr_pred: (B, 100, 6) 原始 query 预测
+        labels: (B, 6) 目标标签
+
+    Returns:
+        best_queries: (B, 6) 匹配上的 query 预测
+    """
+    from scipy.optimize import linear_sum_assignment
+    B = detr_pred.size(0)
+
+    out_bbox = detr_pred[..., :4]          # (B, 100, 4)
+    tgt_bbox = labels[..., :4].unsqueeze(1)  # (B, 1, 4)
+    cost = torch.cdist(out_bbox, tgt_bbox, p=1).squeeze(-1)  # (B, 100)
+
+    best_queries = []
+    for b in range(B):
+        cost_b = cost[b].cpu().numpy()
+        row_ind, _ = linear_sum_assignment(cost_b)
+        best_queries.append(detr_pred[b, row_ind[0]])  # (6,) — 取 cost 最低的
+
+    return torch.stack(best_queries).to(device)  # (B, 6)
+
+
 def train_model(model, train_loader, test_loader, config, device, checkpoint_path=None, task_id=None):
     """训练模型
 
@@ -1127,8 +1156,14 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                         assigned_target, pos_mask = assigner(labels)
                         loss = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                     else:  # detr
+                        # Hungarian 匹配选最佳 query → 推理路径 → 最终输出
+                        best_query = _select_best_query_detr(grid_pred, labels, device)
+                        feat_1d = model.backbone_1d(seq_1d)
+                        query_feat = model.query_proj(best_query)
+                        fused = model.fusion(query_feat, feat_1d)
+                        final_output = model.output_head(fused)
                         indices = matcher(grid_pred, {'labels': labels})
-                        loss = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                        loss = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices, final_output)
                     outputs = grid_pred
                 else:
                     outputs = model(seq_1d, img_2d)
@@ -1148,8 +1183,14 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                         assigned_target, pos_mask = assigner(labels)
                         loss = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                     else:  # detr
+                        # Hungarian 匹配选最佳 query → 推理路径 → 最终输出
+                        best_query = _select_best_query_detr(grid_pred, labels, device)
+                        feat_1d = model.backbone_1d(seq_1d)
+                        query_feat = model.query_proj(best_query)
+                        fused = model.fusion(query_feat, feat_1d)
+                        final_output = model.output_head(fused)
                         indices = matcher(grid_pred, {'labels': labels})
-                        loss = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                        loss = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices, final_output)
                     outputs = grid_pred
                 else:
                     outputs = model(seq_1d, img_2d)
@@ -1185,8 +1226,14 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                         assigned_target, pos_mask = assigner(labels)
                         loss = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                     else:  # detr
+                        # Hungarian 匹配选最佳 query → 推理路径 → 最终输出
+                        best_query = _select_best_query_detr(grid_pred, labels, device)
+                        feat_1d = model.backbone_1d(seq_1d)
+                        query_feat = model.query_proj(best_query)
+                        fused = model.fusion(query_feat, feat_1d)
+                        final_output = model.output_head(fused)
                         indices = matcher(grid_pred, {'labels': labels})
-                        loss = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                        loss = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices, final_output)
                 else:
                     outputs = model(seq_1d, img_2d)
                     if task == 'segmentation':
@@ -1263,8 +1310,14 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                                 assigned_target, pos_mask = assigner(labels)
                                 loss_total = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                             else:  # detr
+                                # Hungarian 匹配选最佳 query → 推理路径 → 最终输出
+                                best_query = _select_best_query_detr(grid_pred, labels, device)
+                                feat_1d = model.backbone_1d(seq_1d)
+                                query_feat = model.query_proj(best_query)
+                                fused = model.fusion(query_feat, feat_1d)
+                                final_output = model.output_head(fused)
                                 indices = matcher(grid_pred, {'labels': labels})
-                                loss_total = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                                loss_total = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices, final_output)
                             outputs = grid_pred  # 用于调试打印
                         else:
                             # resnet18 等标准变体
@@ -1289,8 +1342,14 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                             assigned_target, pos_mask = assigner(labels)
                             loss_total = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                         else:  # detr
+                            # Hungarian 匹配选最佳 query → 推理路径 → 最终输出
+                            best_query = _select_best_query_detr(grid_pred, labels, device)
+                            feat_1d = model.backbone_1d(seq_1d)
+                            query_feat = model.query_proj(best_query)
+                            fused = model.fusion(query_feat, feat_1d)
+                            final_output = model.output_head(fused)
                             indices = matcher(grid_pred, {'labels': labels})
-                            loss_total = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices)
+                            loss_total = criterion(grid_pred, {'labels': labels}, global_density, labels[:, 5:6], indices, final_output)
                         outputs = grid_pred  # 用于调试打印
                     else:
                         outputs = model(seq_1d, img_2d)

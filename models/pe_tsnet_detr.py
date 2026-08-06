@@ -325,11 +325,14 @@ class DETRStyle(nn.Module):
         )
         feat_dim_1d = 64
 
+        # query 投影：将 6 维 query 投影到 128 维再融合
+        self.query_proj = nn.Linear(6, 128)
+
         # 融合层
-        self.fusion = CrossAttentionFusion(dim_2d=6, dim_1d=feat_dim_1d)
+        self.fusion = CrossAttentionFusion(dim_2d=128, dim_1d=feat_dim_1d)
 
         # 输出头
-        fused_dim = 6 + feat_dim_1d
+        fused_dim = 128 + feat_dim_1d  # 128 + 64 = 192
         self.output_head = MultiTaskHead(
             input_dim=fused_dim,
             hidden_dim=128,
@@ -386,13 +389,15 @@ class DETRStyle(nn.Module):
         conf = detr_pred[..., 4:5]  # (B, num_queries, 1)
         best_idx = conf.squeeze(-1).argmax(dim=1)  # (B,)
         B_d = detr_pred.size(0)
-        query_feat = detr_pred[torch.arange(B_d, device=detr_pred.device), best_idx]  # (B, 6)
+        best_query = detr_pred[torch.arange(B_d, device=detr_pred.device), best_idx]  # (B, 6)
 
         # ========== 1D 分支 ==========
         feat_1d = self.backbone_1d(x_1d)  # (B, 64)
 
         # ========== 融合 ==========
-        fused = self.fusion(query_feat, feat_1d)
+        # 推理时：query_proj → fusion → output_head（与训练链路一致）
+        query_feat = self.query_proj(best_query)  # (B, 6) → (B, 128)
+        fused = self.fusion(query_feat, feat_1d)  # (B, 192)
 
         # ========== 输出 ==========
         output = self.output_head(fused)

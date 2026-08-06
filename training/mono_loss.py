@@ -1006,7 +1006,7 @@ class DETRLoss(nn.Module):
         self.lambda_conf = lambda_conf
         self.lambda_mono = lambda_mono
 
-    def forward(self, pred, target, global_density, target_density, indices=None):
+    def forward(self, pred, target, global_density, target_density, indices=None, final_output=None):
         """
         计算 DETR 损失
 
@@ -1016,6 +1016,7 @@ class DETRLoss(nn.Module):
             global_density: (B, 1) 最大密度
             target_density: (B, 1) 目标密度
             indices: Hungarian 匹配结果（可选）
+            final_output: (B, 6) 融合后的输出（query_proj→fusion→output_head，用于监督损失）
 
         Returns:
             loss: 总损失
@@ -1070,6 +1071,16 @@ class DETRLoss(nn.Module):
             self.lambda_mono * loss_mono +
             loss_density
         )
+
+        # 监督融合层输出（训练/推理特征空间一致的关键）
+        if final_output is not None:
+            tgt_labels = target['labels']  # (B, 6)
+            loss_supervise = F.smooth_l1_loss(
+                final_output[:, :4], tgt_labels[:, :4]
+            ) + F.mse_loss(
+                final_output[:, 5:6], tgt_labels[:, 5:6]
+            )
+            loss_total = loss_total + 0.5 * loss_supervise
 
         return loss_total
 

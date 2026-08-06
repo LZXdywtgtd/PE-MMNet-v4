@@ -564,7 +564,7 @@ class SwinYOLOFPNWithPatchTST(nn.Module):
     与 SwinYOLOFPN 相同，但 1D 分支使用 PatchTST 替代 TemporalFeatureExtractor
     """
 
-    def __init__(self, seq_len=300, image_channels=2, image_size=512,
+    def __init__(self, seq_len=300, image_channels=2, image_size=256,
                  pretrained_2d=True, dropout=0.2, grid_size=16,
                  patch_size=10, d_model=64, nhead=4, num_layers=2):
         super().__init__()
