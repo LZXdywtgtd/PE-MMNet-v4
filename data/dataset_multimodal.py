@@ -1290,14 +1290,11 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
     # 创建DataLoader
     def collate_fn_with_cutmix(batch):
         """collate_fn 支持 ThermalCutMix 增强"""
-        # 数据集返回 ((seq_1d, img_2d), label)
-        # 第一步：拆出 (seq_1d, img_2d) 和 label
-        inputs_and_labels = [item[0] for item in batch]
+        # 数据集返回 ((seq_1d, img_2d), label)，一次 zip 拆解
+        features_and_labels = [item[0] for item in batch]
         labels_list = [item[1] for item in batch]
-
-        # 第二步：从 (seq_1d, img_2d) 元组中拆出各自分量
-        seq_1d_list = [item[0] for item in inputs_and_labels]
-        img_2d_list = [item[1] for item in inputs_and_labels]
+        seq_1d_list, img_2d_list = zip(*features_and_labels)
+        seq_1d_list, img_2d_list = list(seq_1d_list), list(img_2d_list)
 
         # ThermalCutMix: 批量级别混合（仅训练集，物理安全版）
         cutmix_applied = [False] * len(batch)

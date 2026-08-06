@@ -694,7 +694,8 @@ def staged_training(variant_key, config, device, data_roots=None, task_id=None):
     """
     from data.dataset_multimodal import create_multibatch_dataloaders
 
-    # 将 task_id 添加到 config
+    # 将 task_id 添加到 config（复制避免污染调用方）
+    config = dict(config)
     if task_id:
         config['task_id'] = task_id
 
@@ -734,32 +735,17 @@ def staged_training(variant_key, config, device, data_roots=None, task_id=None):
 
     # 创建模型
     ModelClass = VARIANT_MODELS.get(variant_key, PETSNetMultimodal)
+    model_kwargs = dict(
+        seq_len=config.get('feature_len', 300),
+        image_channels=2,
+        image_size=config['image_size'],
+        pretrained_2d=True,
+        dropout=config['dropout'],
+    )
+    # 只有 PETSNetMultimodal(resnet18) 支持 task 参数
     if variant_key == 'resnet18':
-        model = ModelClass(
-            seq_len=config.get('feature_len', 300),
-            image_channels=2,
-            image_size=config['image_size'],
-            pretrained_2d=True,
-            dropout=config['dropout'],
-            task=config.get('task', 'detection')
-        )
-    elif variant_key == 'detr':
-        model = ModelClass(
-            seq_len=config.get('feature_len', 300),
-            image_channels=2,
-            image_size=config['image_size'],
-            pretrained_2d=True,
-            dropout=config['dropout']
-        )
-    else:
-        # YOLO 变体
-        model = ModelClass(
-            seq_len=config.get('feature_len', 300),
-            image_channels=2,
-            image_size=config['image_size'],
-            pretrained_2d=True,
-            dropout=config['dropout']
-        )
+        model_kwargs['task'] = config.get('task', 'detection')
+    model = ModelClass(**model_kwargs)
     model = model.to(device)
 
     # 阶段1训练
@@ -987,19 +973,36 @@ def estimate_training_time(model, train_loader, test_loader, criterion, optimize
     return avg_time, estimated_total / 60  # 返回(单轮时间, 总时间分钟)
 
 
+def _build_checkpoint_data(model, config, epoch, best_loss, save_reason):
+    """构建检查点数据字典"""
+    data = {
+        'model_state_dict': model.state_dict(),
+        'task': config.get('task', 'detection'),
+        'config': config,
+        'epoch': epoch,
+        'best_loss': best_loss,
+        'timestamp': datetime.now().isoformat(),
+        'is_complete': False,
+        'save_reason': save_reason,
+    }
+    if config.get('task_id'):
+        data['task_id'] = config['task_id']
+    return data
+
+
 def _mark_checkpoint_complete(best_path, last_path):
     """将检查点标记为已完成，用于区分意外中断和正常结束"""
     for path in [best_path, last_path]:
-        if path and os.path.exists(path):
+        if not path:
+            continue
+        try:
             ckpt = torch.load(path, map_location='cpu', weights_only=False)
-            ckpt['is_complete'] = True
-            # 保存原因重命名：improvement→early_stop，epoch_end→completed
-            reason = ckpt.get('save_reason', 'epoch_end')
-            if reason == 'improvement':
-                ckpt['save_reason'] = 'early_stop'
-            else:
-                ckpt['save_reason'] = 'completed'
-            torch.save(ckpt, path)
+        except (FileNotFoundError, EOFError, OSError):
+            continue
+        ckpt['is_complete'] = True
+        reason = ckpt.get('save_reason', 'epoch_end')
+        ckpt['save_reason'] = 'early_stop' if reason == 'improvement' else 'completed'
+        torch.save(ckpt, path)
 
 
 def train_model(model, train_loader, test_loader, config, device, checkpoint_path=None, task_id=None):
@@ -1008,14 +1011,15 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
     Args:
         task_id: 任务ID（用于检查点标记，团队协作时使用）
     """
-    # 将 task_id 添加到 config
+    # 将 task_id 添加到 config（复制避免污染调用方）
+    config = dict(config)
     if task_id:
         config['task_id'] = task_id
 
     # 推导兜底检查点路径（每个 epoch 结束无条件保存）
     last_checkpoint_path = None
-    if checkpoint_path:
-        last_checkpoint_path = checkpoint_path.replace('_best.pt', '_last.pt')
+    if checkpoint_path and checkpoint_path.endswith('_best.pt'):
+        last_checkpoint_path = checkpoint_path[:-8] + '_last.pt'
 
     # 根据任务类型选择损失函数
     task = config.get('task', 'detection')
@@ -1462,39 +1466,19 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             best_epoch = epoch + 1  # 记录最佳Epoch
             patience_counter = 0
             if checkpoint_path:
-                # 保存模型权重和元数据（task、config、task_id）
-                checkpoint_data = {
-                    'model_state_dict': model.state_dict(),
-                    'task': config.get('task', 'detection'),
-                    'config': config,
-                    'epoch': epoch,
-                    'best_loss': best_loss,
-                    'timestamp': datetime.now().isoformat(),
-                    'is_complete': False,          # 训练尚未完成
-                    'save_reason': 'improvement',   # 因损失改善而保存
-                }
-                # 添加 task_id（如果有，团队协作时使用）
-                if config.get('task_id'):
-                    checkpoint_data['task_id'] = config['task_id']
-                torch.save(checkpoint_data, checkpoint_path)
+                torch.save(
+                    _build_checkpoint_data(model, config, epoch, best_loss, 'improvement'),
+                    checkpoint_path
+                )
         else:
             patience_counter += 1
 
         # 每个 epoch 结束无条件保存兜底检查点（用于崩溃恢复）
         if last_checkpoint_path:
-            last_data = {
-                'model_state_dict': model.state_dict(),
-                'task': config.get('task', 'detection'),
-                'config': config,
-                'epoch': epoch,
-                'best_loss': best_loss,
-                'timestamp': datetime.now().isoformat(),
-                'is_complete': False,          # 初始为 False，训练正常结束时更新
-                'save_reason': 'epoch_end',    # 每 epoch 结束的兜底保存
-            }
-            if config.get('task_id'):
-                last_data['task_id'] = config['task_id']
-            torch.save(last_data, last_checkpoint_path)
+            torch.save(
+                _build_checkpoint_data(model, config, epoch, best_loss, 'epoch_end'),
+                last_checkpoint_path
+            )
 
         # 获取当前学习率
         current_lr = optimizer.param_groups[0]['lr']
@@ -1634,7 +1618,7 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
         CHECKPOINT_DIR,
         f"{variant_key}_{backbone_2d}_{backbone_1d}_{fusion}_task{task}_offset{predict_offset}_best.pt"
     )
-    last_save_path = save_path.replace('_best.pt', '_last.pt')
+    last_save_path = save_path[:-8] + '_last.pt' if save_path.endswith('_best.pt') else None
 
     # ========== 模型实例化（根据变体类型）==========
 
