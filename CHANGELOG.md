@@ -6,6 +6,90 @@
 
 ---
 
+## [v4.6.3] - 2026-08-06
+
+### 修复：模型代码全面审计
+
+#### collate_fn_with_cutmix 解包修复
+
+**问题**：数据集返回 `((seq_1d, img_2d), label)`，但 `zip(*batch)` 只产生 2 个分组，代码期望 3 个
+
+**修复**：分两步解包 + multitask 模式的 tuple 标签分别堆叠
+
+#### train_variant args 作用域修复
+
+**问题**：`train_variant` 中引用 `args.use_coord_attn`，但 `args` 未作为参数传入
+
+**修复**：添加 `use_coord_attn=False` 参数，调用处传递 `args.use_coord_attn`
+
+#### DETR feat_size 修复
+
+**问题**：`DETRStyle` 中 `self.feat_size = 16` 导致位置编码维度错误
+
+**原因**：ResNet-18 stride=32，256×256 输入 → 8×8 特征图，非 16×16
+
+**修复**：`self.feat_size = 8`（同时更新注释说明）
+
+#### BackboneWithAttention 多尺度支持
+
+**问题**：骨干网络返回列表（多尺度特征）时跳过注意力增强
+
+**修复**：新增列表输入处理，取最后一层（最高语义级别）应用注意力
+
+```python
+if isinstance(feat, (list, tuple)):
+    feat = feat[-1]  # 取最高语义层
+```
+
+#### staged_training 模型实例化修复
+
+**问题**：非 resnet18 变体创建时仅传 `dropout`，遗漏 `image_size`/`seq_len` 等关键参数
+
+**修复**：为 detr 和 YOLO 变体补充完整参数
+
+#### GatedMultimodalFusion 实现位置确认
+
+**问题**：融合模块在 `pe_tsnet_fusion.py` 和 `pe_tsnet_multimodal.py` 均有定义
+
+**确认**：`pe_tsnet_fusion.py` 无外部引用，`pe_tsnet_multimodal.py` 中的版本为实际使用者
+
+#### ThermalCutMix lambda_ bug 修复
+
+**问题**：`_generate_mask` 中引用未定义变量 `lambda_`
+
+**修复**：改用 `torch.rand_like()` 动态生成掩码
+
+#### DETR TransformerEncoder nested_tensor 警告消除
+
+**问题**：`norm_first=True` 与 `enable_nested_tensor=True` 不兼容，输出 UserWarning
+
+**修复**：`TransformerEncoder(enable_nested_tensor=False)` 显式禁用嵌套张量优化
+
+#### 检查点完成状态保障机制
+
+**目标**：区分检查点是"意外退出留下"还是"训练完成留下"
+
+**新增文件**：
+- `{...}_last.pt`：每个 epoch 结束无条件保存的兜底检查点
+
+**新增元数据字段**：
+- `is_complete`：训练是否正常结束（`True`=完成，`False`=中断）
+- `save_reason`：`improvement`/`epoch_end`/`early_stop`/`completed`
+
+**加载决策逻辑**：
+- `best.pt` 存在且 `is_complete=True` → 训练已完成，直接返回
+- `best.pt` 存在且 `is_complete=False` → 意外中断，加载并继续训练
+- `best.pt` 不存在但 `_last.pt` 存在 → 从崩溃恢复
+- 两者都不存在 → 从头训练
+
+### 文档更新
+
+- `api.md`：修正 GatedMultimodalFusion 导入路径为 `models.pe_tsnet_multimodal`
+- `开发人员文档.md`：更新 GatedMultimodalFusion 位置，更新 BackboneWithAttention 说明
+- `架构设计文档.md`：确认 DETR 特征图描述（8×8）与代码一致
+
+---
+
 ## [v4.6.2] - 2026-08-06
 
 ### 新增：PatchTST 1D 时序骨干

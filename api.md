@@ -144,7 +144,7 @@ backbone_1d = TemporalFeatureExtractor(
 ### 2.5 融合模块 (models.pe_tsnet_multimodal)
 
 ```python
-from models.pe_tsnet_multimodal import CrossAttentionFusion, AdaptiveFusion
+from models.pe_tsnet_multimodal import CrossAttentionFusion, GatedMultimodalFusion, AdaptiveFusion
 
 # 交叉注意力融合
 fusion = CrossAttentionFusion(
@@ -178,6 +178,7 @@ model = BackboneWithAttention(
     attention_type='coord',
     reduction=32
 )
+# 支持多尺度骨干（返回列表时自动取最后一层）
 ```
 
 ### 2.7 PatchTST 时序骨干 (models.pe_tsnet_patchtst)
@@ -203,12 +204,15 @@ model = PatchTSTWithRate(
 )
 ```
 
-### 2.8 门控融合模块 (models.pe_tsnet_fusion)
+### 2.8 门控融合模块 (models.pe_tsnet_multimodal)
+
+> ⚠️ 注意：`GatedMultimodalFusion` 和 `AdaptiveFusion` 的实际实现位于 `models.pe_tsnet_multimodal`。
+> `models.pe_tsnet_fusion` 中有历史版本但未被任何代码引用。
 
 ```python
-from models.pe_tsnet_fusion import GatedMultimodalFusion, AdaptiveFusion
+from models.pe_tsnet_multimodal import GatedMultimodalFusion, AdaptiveFusion
 
-# 门控多模态融合
+# 门控多模态融合（温度/应力分治策略）
 fusion = GatedMultimodalFusion(
     dim_2d=512,
     dim_1d=64,

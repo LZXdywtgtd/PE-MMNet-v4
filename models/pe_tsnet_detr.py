@@ -273,14 +273,15 @@ class DETRStyle(nn.Module):
         self.num_queries = num_queries
 
         # 特征图尺寸（ResNet-18 最终特征图）
-        self.feat_size = 16  # 512 / 16 = 32 grids
+        # ResNet-18 stride=32：256 / 32 = 8 grids
+        self.feat_size = 8  # 256 / 32 = 8
 
         # 2D 骨干：ResNet-18（启用空间特征输出）
         self.backbone_2d = ResNet18Backbone2D(
             in_channels=image_channels,
             pretrained=pretrained_2d
         )
-        self.backbone_2d.set_spatial_output(True)  # 输出 (B, 512, 16, 16) 而非 (B, 512)
+        self.backbone_2d.set_spatial_output(True)  # 输出 (B, 512, 8, 8) 而非 (B, 512)
 
         # 投影层：512 -> d_model
         self.input_proj = nn.Conv2d(512, d_model, kernel_size=1)
@@ -299,7 +300,8 @@ class DETRStyle(nn.Module):
         )
         self.transformer_encoder = nn.TransformerEncoder(
             encoder_layer,
-            num_layers=encoder_layers
+            num_layers=encoder_layers,
+            enable_nested_tensor=False  # norm_first=True 时嵌套张量优化不兼容
         )
 
         # Transformer 解码器

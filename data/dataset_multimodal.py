@@ -1290,7 +1290,14 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
     # 创建DataLoader
     def collate_fn_with_cutmix(batch):
         """collate_fn 支持 ThermalCutMix 增强"""
-        seq_1d_list, img_2d_list, labels_list = zip(*batch)
+        # 数据集返回 ((seq_1d, img_2d), label)
+        # 第一步：拆出 (seq_1d, img_2d) 和 label
+        inputs_and_labels = [item[0] for item in batch]
+        labels_list = [item[1] for item in batch]
+
+        # 第二步：从 (seq_1d, img_2d) 元组中拆出各自分量
+        seq_1d_list = [item[0] for item in inputs_and_labels]
+        img_2d_list = [item[1] for item in inputs_and_labels]
 
         # ThermalCutMix: 批量级别混合（仅训练集，物理安全版）
         cutmix_applied = [False] * len(batch)
@@ -1322,7 +1329,13 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
         # 堆叠
         seq_1d = torch.stack(seq_1d_list)
         img_2d = torch.stack(img_2d_list)
-        labels = torch.stack(labels_list)
+
+        # multitask 模式：label 是 (mask, detection) 元组，需要分别堆叠
+        if isinstance(labels_list[0], tuple):
+            mask_list, detection_list = zip(*labels_list)
+            labels = (torch.stack(mask_list), torch.stack(detection_list))
+        else:
+            labels = torch.stack(labels_list)
 
         return (seq_1d, img_2d), labels
 

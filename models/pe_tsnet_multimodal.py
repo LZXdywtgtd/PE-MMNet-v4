@@ -199,6 +199,12 @@ class BackboneWithAttention(nn.Module):
             (B, feature_dim) - 注意力增强的特征
         """
         feat = self.backbone(x)
+
+        # 处理多尺度特征（骨干返回列表，如 Swin 多层输出）
+        if isinstance(feat, (list, tuple)):
+            # 取最后一层作为主特征（最高语义级别）
+            feat = feat[-1]
+
         # 如果骨干返回的是2D特征图，先应用注意力
         if feat.dim() == 4:
             feat = self.attention(feat)

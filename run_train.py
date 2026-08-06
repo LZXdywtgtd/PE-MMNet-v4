@@ -734,14 +734,32 @@ def staged_training(variant_key, config, device, data_roots=None, task_id=None):
 
     # 创建模型
     ModelClass = VARIANT_MODELS.get(variant_key, PETSNetMultimodal)
-    model = ModelClass(
-        seq_len=config.get('feature_len', 300),
-        image_channels=2,
-        image_size=config['image_size'],
-        pretrained_2d=True,
-        dropout=config['dropout'],
-        task=config.get('task', 'detection')
-    ) if variant_key == 'resnet18' else ModelClass(dropout=config['dropout'])
+    if variant_key == 'resnet18':
+        model = ModelClass(
+            seq_len=config.get('feature_len', 300),
+            image_channels=2,
+            image_size=config['image_size'],
+            pretrained_2d=True,
+            dropout=config['dropout'],
+            task=config.get('task', 'detection')
+        )
+    elif variant_key == 'detr':
+        model = ModelClass(
+            seq_len=config.get('feature_len', 300),
+            image_channels=2,
+            image_size=config['image_size'],
+            pretrained_2d=True,
+            dropout=config['dropout']
+        )
+    else:
+        # YOLO 变体
+        model = ModelClass(
+            seq_len=config.get('feature_len', 300),
+            image_channels=2,
+            image_size=config['image_size'],
+            pretrained_2d=True,
+            dropout=config['dropout']
+        )
     model = model.to(device)
 
     # 阶段1训练
@@ -969,6 +987,21 @@ def estimate_training_time(model, train_loader, test_loader, criterion, optimize
     return avg_time, estimated_total / 60  # 返回(单轮时间, 总时间分钟)
 
 
+def _mark_checkpoint_complete(best_path, last_path):
+    """将检查点标记为已完成，用于区分意外中断和正常结束"""
+    for path in [best_path, last_path]:
+        if path and os.path.exists(path):
+            ckpt = torch.load(path, map_location='cpu', weights_only=False)
+            ckpt['is_complete'] = True
+            # 保存原因重命名：improvement→early_stop，epoch_end→completed
+            reason = ckpt.get('save_reason', 'epoch_end')
+            if reason == 'improvement':
+                ckpt['save_reason'] = 'early_stop'
+            else:
+                ckpt['save_reason'] = 'completed'
+            torch.save(ckpt, path)
+
+
 def train_model(model, train_loader, test_loader, config, device, checkpoint_path=None, task_id=None):
     """训练模型
 
@@ -978,6 +1011,11 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
     # 将 task_id 添加到 config
     if task_id:
         config['task_id'] = task_id
+
+    # 推导兜底检查点路径（每个 epoch 结束无条件保存）
+    last_checkpoint_path = None
+    if checkpoint_path:
+        last_checkpoint_path = checkpoint_path.replace('_best.pt', '_last.pt')
 
     # 根据任务类型选择损失函数
     task = config.get('task', 'detection')
@@ -1432,6 +1470,8 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                     'epoch': epoch,
                     'best_loss': best_loss,
                     'timestamp': datetime.now().isoformat(),
+                    'is_complete': False,          # 训练尚未完成
+                    'save_reason': 'improvement',   # 因损失改善而保存
                 }
                 # 添加 task_id（如果有，团队协作时使用）
                 if config.get('task_id'):
@@ -1439,6 +1479,22 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 torch.save(checkpoint_data, checkpoint_path)
         else:
             patience_counter += 1
+
+        # 每个 epoch 结束无条件保存兜底检查点（用于崩溃恢复）
+        if last_checkpoint_path:
+            last_data = {
+                'model_state_dict': model.state_dict(),
+                'task': config.get('task', 'detection'),
+                'config': config,
+                'epoch': epoch,
+                'best_loss': best_loss,
+                'timestamp': datetime.now().isoformat(),
+                'is_complete': False,          # 初始为 False，训练正常结束时更新
+                'save_reason': 'epoch_end',    # 每 epoch 结束的兜底保存
+            }
+            if config.get('task_id'):
+                last_data['task_id'] = config['task_id']
+            torch.save(last_data, last_checkpoint_path)
 
         # 获取当前学习率
         current_lr = optimizer.param_groups[0]['lr']
@@ -1536,14 +1592,17 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
 
         if patience_counter >= config['patience']:
             print_warning(f"早停: 连续 {config['patience']} 个epoch未改善")
+            _mark_checkpoint_complete(checkpoint_path, last_checkpoint_path)
             break
 
     total_time = time.time() - start_time
     print_info(f"训练完成! 总时间: {total_time:.1f}s ({total_time/60:.1f}min)")
+    # 标记检查点为已完成（正常结束）
+    _mark_checkpoint_complete(checkpoint_path, last_checkpoint_path)
     return model, {'val_loss': best_loss}
 
 
-def train_variant(variant_key, config, device, data_roots=None, task_id=None):
+def train_variant(variant_key, config, device, data_roots=None, task_id=None, use_coord_attn=False):
     """训练单个变体（消融实验用）"""
     if data_roots is None:
         data_roots = get_data_batches()
@@ -1575,6 +1634,7 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None):
         CHECKPOINT_DIR,
         f"{variant_key}_{backbone_2d}_{backbone_1d}_{fusion}_task{task}_offset{predict_offset}_best.pt"
     )
+    last_save_path = save_path.replace('_best.pt', '_last.pt')
 
     # ========== 模型实例化（根据变体类型）==========
 
@@ -1647,18 +1707,36 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None):
             start_epoch = 0
             best_metric = float('inf')
 
-    # Case 4: predict_offset == 0 且检查点存在 → 加载并返回
+    # Case 4: predict_offset == 0 且检查点存在 → 智能加载
     elif os.path.exists(save_path):
-        print_info(f"[OK] 加载检查点: {save_path}")
-        model = create_variant_model()
         checkpoint = torch.load(save_path, map_location=device, weights_only=False)
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        is_complete = checkpoint.get('is_complete', False)
+
+        if is_complete:
+            # 训练已完成，直接返回（不重复训练）
+            print_info(f"[OK] 检查点已存在且训练完成: {save_path}")
+            print_info(f"   原因: {checkpoint.get('save_reason', 'unknown')}")
+            print_info(f"   轮次: Epoch {checkpoint.get('epoch', '?')+1}, "
+                       f"最佳损失: {checkpoint.get('best_loss', '?')}")
+            print_info(f"   如需重新训练，请删除检查点文件或使用 --force_retrain")
+            model = create_variant_model()
             model.load_state_dict(checkpoint['model_state_dict'])
+            model.eval()
+            return model
         else:
-            model.load_state_dict(checkpoint)
-        print_info(f"   继续训练...")
-        model.eval()
-        return model
+            # 意外中断，继续训练
+            print_info(f"[OK] 检测到意外中断的检查点: {save_path}")
+            print_info(f"   Epoch {checkpoint.get('epoch', '?')+1}, 损失: {checkpoint.get('best_loss', '?')}")
+            print_info(f"   继续训练...")
+            model = create_variant_model()
+            model.load_state_dict(checkpoint['model_state_dict'])
+
+    # Case 4b: 无 best.pt 但有 _last.pt → 从崩溃恢复
+    elif os.path.exists(last_save_path):
+        print_info(f"[OK] 从意外中断恢复: {last_save_path}")
+        checkpoint = torch.load(last_save_path, map_location=device, weights_only=False)
+        model = create_variant_model()
+        model.load_state_dict(checkpoint['model_state_dict'])
 
     # Case 3: 无检查点 → 从头训练
     else:
@@ -1670,7 +1748,7 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None):
     model = model.to(device)
 
     # 坐标注意力集成
-    if args.use_coord_attn and hasattr(model, 'branch_2d'):
+    if use_coord_attn and hasattr(model, 'branch_2d'):
         from models.pe_tsnet_multimodal import BackboneWithAttention
         model.branch_2d = BackboneWithAttention(
             model.branch_2d,
@@ -1993,7 +2071,7 @@ def main():
             config['freeze_1d'] = args.freeze_1d
             model = staged_training(args.variant, config, device, data_roots)
         else:
-            model = train_variant(args.variant, config, device, data_roots, task_id=args.task_id)
+            model = train_variant(args.variant, config, device, data_roots, task_id=args.task_id, use_coord_attn=args.use_coord_attn)
 
         if model is not None:
             # 训练完成后自动评估

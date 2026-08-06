@@ -172,7 +172,18 @@ project_v4/
 
 ## 版本信息
 
-**当前版本：v4.6.2 (2026-08-06)**
+**当前版本：v4.6.3 (2026-08-06)**
+
+### v4.6.3 修复内容
+
+- **DETR feat_size**：位置编码维度 16→8（ResNet-18 stride=32 → 256/32=8 grids）
+- **BackboneWithAttention**：新增多尺度骨干（列表输入）支持
+- **staged_training**：修复非 resnet18 变体创建时参数缺失问题
+- **ThermalCutMix**：修复 `_generate_mask` 中未定义变量引用
+- **train_variant**：修复 `args.use_coord_attn` 引用未定义变量问题
+- **collate_fn_with_cutmix**：修复 `zip(*batch)` 解包数量不匹配（支持 multitask tuple 标签）
+- **DETR TransformerEncoder**：消除 `norm_first/nested_tensor` 兼容性警告
+- **检查点完成状态机制**：`best.pt` + `_last.pt` 双保险，`is_complete` 字段区分意外中断和正常完成
 
 ### v4.6.2 新增功能
 
