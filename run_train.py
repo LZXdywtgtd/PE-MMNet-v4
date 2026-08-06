@@ -1017,15 +1017,20 @@ def _select_best_query_detr(detr_pred, labels, device):
     """
     from scipy.optimize import linear_sum_assignment
     B = detr_pred.size(0)
+    num_queries = detr_pred.size(1)  # 通常为 100
 
     out_bbox = detr_pred[..., :4]          # (B, 100, 4)
     tgt_bbox = labels[..., :4].unsqueeze(1)  # (B, 1, 4)
-    cost = torch.cdist(out_bbox, tgt_bbox, p=1).squeeze(-1)  # (B, 100)
+    cost = torch.cdist(out_bbox, tgt_bbox, p=1).squeeze(-1)  # (B, 100) safe for B>1
 
     best_queries = []
     for b in range(B):
-        cost_b = cost[b].cpu().numpy()
-        row_ind, _ = linear_sum_assignment(cost_b)
+        cost_b = cost[b].detach().cpu().numpy()  # (100,) — 1D
+        # Hungarian 算法要求方阵，将 (100,) → (100, 100) 填充 0
+        n = cost_b.shape[0]
+        cost_sq = np.zeros((n, n))
+        cost_sq[:, 0] = cost_b  # 第一列填入实际 cost
+        row_ind, _ = linear_sum_assignment(cost_sq)
         best_queries.append(detr_pred[b, row_ind[0]])  # (6,) — 取 cost 最低的
 
     return torch.stack(best_queries).to(device)  # (B, 6)
@@ -1431,10 +1436,10 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                         indices = matcher(detr_full_pred, {'labels': labels})
                         loss_total = criterion(detr_full_pred, {'labels': labels}, global_density, labels[:, 5:6], indices)
                         model.eval()  # 恢复 eval 模式
-                        # eval 模式的最佳预测用于指标收集
-                        model_output, _ = model(seq_1d, img_2d)
-                        all_preds.append(global_density.cpu())
-                        all_targets.append(labels[:, 5:6].cpu())
+                        # eval 模式的最佳预测用于指标收集（全 6 维）
+                        model_output, _ = model(seq_1d, img_2d)  # (B, 6)
+                        all_preds.append(model_output.cpu())     # (B, 6)
+                        all_targets.append(labels[:, :6].cpu())  # (B, 6)
                 else:
                     outputs = model(seq_1d, img_2d)
                     # 根据任务类型计算损失
