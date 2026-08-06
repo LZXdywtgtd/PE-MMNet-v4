@@ -462,6 +462,9 @@ class ViTYOLOFPN(nn.Module):
         self.image_channels = image_channels
         self.image_size = image_size
         self.grid_size = grid_size
+        # ViT 输出固定 16×16=256 网格
+        self.actual_grid_size = 16
+        self.actual_num_grids = 256
 
         # 2D 分支：ViT 骨干 + 简化 FPN + YOLO Head
         self.backbone_2d = ViTYOLOBackbone2D(pretrained=pretrained_2d, output_size=grid_size)

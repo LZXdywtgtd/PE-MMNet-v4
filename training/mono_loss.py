@@ -675,10 +675,10 @@ class SegmentationLoss(nn.Module):
         Returns:
             loss: 分割损失，标量
         """
-        # 分割 BCE 也需要安全处理
-        pred_sigmoid = torch.clamp(pred, min=-50, max=50)
+        # 分割 BCE 也需要安全处理（pred 来自 MaskDecoder 已 sigmoid）
+        pred_safe = torch.clamp(pred, min=1e-7, max=1-1e-7)
         loss_dice = self.dice_loss(pred, target)
-        loss_bce = F.binary_cross_entropy_with_logits(pred_sigmoid, target)
+        loss_bce = F.binary_cross_entropy(pred_safe, target)
         return self.lambda_dice * loss_dice + self.lambda_bce * loss_bce
 
 

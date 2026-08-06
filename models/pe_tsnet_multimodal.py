@@ -1189,7 +1189,8 @@ class PETSNetMultimodal(nn.Module):
                  pretrained_2d=True,
                  dropout=0.2,
                  task='detection',
-                 fusion='cross_attn'):
+                 fusion='cross_attn',
+                 seq_channels=1):
         """
         Args:
             seq_len: 1D 序列长度（默认 300）
@@ -1206,6 +1207,7 @@ class PETSNetMultimodal(nn.Module):
         self.task = task
         self.image_size = image_size
         self.fusion_type = fusion
+        self.seq_channels = seq_channels
 
         # -------------------------------------------------------------------------
         # 分支 1：2D 视觉特征提取（512 维）
@@ -1221,8 +1223,8 @@ class PETSNetMultimodal(nn.Module):
         # -------------------------------------------------------------------------
         # hidden_dim=32 → 双分支 concat 后 64 维 → 全局池化后仍是 64 维
         self.branch_1d = TemporalFeatureExtractor(
-            input_dim=1,
-            hidden_dim=32,     # 每个分支 32 通道
+            input_dim=seq_channels,  # 支持 triple_channel (3) 或单通道 (1)
+            hidden_dim=32,           # 每个分支 32 通道
             num_heads=4,
             dropout=dropout
         )

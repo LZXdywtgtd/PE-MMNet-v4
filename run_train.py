@@ -1639,6 +1639,7 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
         """根据变体类型创建模型"""
         if variant_key == 'resnet18':
             # 完整模型：使用 PETSNetMultimodal
+            seq_channels = 3 if config.get('triple_channel', False) else 1
             return PETSNetMultimodal(
                 seq_len=config.get('feature_len', 300),
                 image_channels=2,
@@ -1646,7 +1647,8 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
                 pretrained_2d=True,
                 dropout=config['dropout'],
                 task=task,
-                fusion=config.get('fusion', 'cross_attn')
+                fusion=config.get('fusion', 'cross_attn'),
+                seq_channels=seq_channels
             )
         elif variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']:
             # YOLO/DETR 变体：传递 image_size 参数
@@ -1916,7 +1918,7 @@ def main():
     # 架构自适应学习率
     arch_config = get_arch_specific_config(
         args.backbone_2d, args.backbone_1d,
-        args_lr=args.lr if args.lr != 3e-4 else None,  # 只有非默认值才覆盖
+        args_lr=args.lr if args.lr != 1e-4 else None,  # 只有非默认值才覆盖
         args_dropout=args.dropout if args.dropout != 0.2 else None
     )
 

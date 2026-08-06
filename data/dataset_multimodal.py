@@ -1309,7 +1309,6 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
 
             mixed_img = img1.clone()
             # 温度通道混合
-            mixed_img = mixed_img.copy()
             mixed_img[0] = img1[0] * lambda_ + img2[0] * (1 - lambda_)
             # 应力通道保持不变
 
