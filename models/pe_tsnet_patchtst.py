@@ -57,9 +57,11 @@ class PatchTST1D(nn.Module):
         self.patch_size = patch_size
         self.num_patches = seq_len // patch_size
 
-        # 确保序列长度可以被patch_size整除
-        assert seq_len % patch_size == 0, \
-            f"seq_len ({seq_len}) 必须能被 patch_size ({patch_size}) 整除"
+        # 如果序列长度不能被 patch_size 整除，截断到最近的整数倍
+        if seq_len % patch_size != 0:
+            self.adjusted_seq_len = (seq_len // patch_size) * patch_size
+        else:
+            self.adjusted_seq_len = seq_len
 
         # Patch Embedding: (B, patch_size) → (B, d_model)
         self.patch_embed = nn.Linear(patch_size, d_model)
@@ -115,7 +117,11 @@ class PatchTST1D(nn.Module):
         """
         batch_size = x.size(0)
 
-        # 重塑为patches: (B, seq_len) → (B, num_patches, patch_size)
+        # 截断到 adjusted_seq_len（如需要）
+        if self.adjusted_seq_len < self.seq_len:
+            x = x[:, :self.adjusted_seq_len]
+
+        # 重塑为patches: (B, num_patches, patch_size)
         x = x.view(batch_size, self.num_patches, self.patch_size)
 
         # Patch embedding: (B, num_patches, patch_size) → (B, num_patches, d_model)
