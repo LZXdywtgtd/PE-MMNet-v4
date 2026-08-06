@@ -415,7 +415,7 @@ def evaluate_model(model, device, data_roots=None, predict_offset=0,
     model.eval()
 
     # 判断是否为新变体（返回元组）
-    is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
+    is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
 
     all_preds, all_targets = [], []
 
@@ -604,7 +604,7 @@ def eval_checkpoint(checkpoint_path, device, image_size=None):
             pretrained_2d=True,
             task=task
         )
-    elif variant_key in ['swin_yolo', 'vit_yolo', 'detr']:
+    elif variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']:
         # YOLO/DETR 变体
         ModelClass = VARIANT_MODELS.get(variant_key, PETSNetMultimodal)
         model = ModelClass(
@@ -912,7 +912,7 @@ def estimate_training_time(model, train_loader, test_loader, criterion, optimize
                         loss = criterion(output, labels)
                     elif task == 'multitask':
                         loss = criterion(output, labels)
-                    elif variant_key in ['swin_yolo', 'vit_yolo']:
+                    elif variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
                         assigned_target, pos_mask = assigner(labels)
                         loss = criterion(output, assigned_target, global_density, labels[:, 5:6], pos_mask)
                     elif variant_key == 'detr':
@@ -932,7 +932,7 @@ def estimate_training_time(model, train_loader, test_loader, criterion, optimize
                         loss = criterion(output, labels)
                     elif task == 'multitask':
                         loss = criterion(output, labels)
-                    elif variant_key in ['swin_yolo', 'vit_yolo']:
+                    elif variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
                         assigned_target, pos_mask = assigner(labels)
                         loss = criterion(output, assigned_target, global_density, labels[:, 5:6], pos_mask)
                     elif variant_key == 'detr':
@@ -997,7 +997,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
     else:
         # detection 模式
         # 检查是否为新变体
-        if variant_key in ['swin_yolo', 'vit_yolo']:
+        if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
             criterion = YOLOLoss(
                 lambda_box=1.0,
                 lambda_conf=1.0,
@@ -1075,10 +1075,10 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
         if fp16_enabled and not dry_run_fp16_disabled:
             with torch.amp.autocast('cuda'):
                 # 检查是否为新变体
-                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
+                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
                 if is_new_variant:
                     grid_pred, global_density = model(seq_1d, img_2d)
-                    if variant_key in ['swin_yolo', 'vit_yolo']:
+                    if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
                         assigned_target, pos_mask = assigner(labels)
                         loss = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                     else:  # detr
@@ -1096,10 +1096,10 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
         else:
             with torch.amp.autocast('cuda', enabled=False):
                 # 检查是否为新变体
-                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
+                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
                 if is_new_variant:
                     grid_pred, global_density = model(seq_1d, img_2d)
-                    if variant_key in ['swin_yolo', 'vit_yolo']:
+                    if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
                         assigned_target, pos_mask = assigner(labels)
                         loss = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                     else:  # detr
@@ -1133,10 +1133,10 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             dry_run_fp16_disabled = True
 
             with torch.amp.autocast('cuda', enabled=False):
-                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
+                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
                 if is_new_variant:
                     grid_pred, global_density = model(seq_1d, img_2d)
-                    if variant_key in ['swin_yolo', 'vit_yolo']:
+                    if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
                         assigned_target, pos_mask = assigner(labels)
                         loss = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                     else:  # detr
@@ -1211,10 +1211,10 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 if fp16_enabled:
                     with torch.amp.autocast('cuda'):
                         # 检查是否为新变体
-                        is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
+                        is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
                         if is_new_variant:
                             grid_pred, global_density = model(seq_1d, img_2d)
-                            if variant_key in ['swin_yolo', 'vit_yolo']:
+                            if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
                                 assigned_target, pos_mask = assigner(labels)
                                 loss_total = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                             else:  # detr
@@ -1237,10 +1237,10 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                     scaler.update()
                 else:
                     # 检查是否为新变体
-                    is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
+                    is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
                     if is_new_variant:
                         grid_pred, global_density = model(seq_1d, img_2d)
-                        if variant_key in ['swin_yolo', 'vit_yolo']:
+                        if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
                             assigned_target, pos_mask = assigner(labels)
                             loss_total = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
                         else:  # detr
@@ -1296,10 +1296,10 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 else:
                     labels = labels.to(device)
                 # 检查是否为新变体
-                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
+                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
                 if is_new_variant:
                     model_output, global_density = model(seq_1d, img_2d)
-                    if variant_key in ['swin_yolo', 'vit_yolo']:
+                    if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
                         # 训练模式：model_output 是 (B, 256, 6)，直接计算损失
                         # 推理模式：model_output 是 (B, 6)，需要适配后计算损失
                         if model_output.ndim == 3:
@@ -1589,7 +1589,7 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None):
                 dropout=config['dropout'],
                 task=task
             )
-        elif variant_key in ['swin_yolo', 'vit_yolo', 'detr']:
+        elif variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']:
             # YOLO/DETR 变体：传递 image_size 参数
             return ModelClass(
                 seq_len=config.get('feature_len', 300),

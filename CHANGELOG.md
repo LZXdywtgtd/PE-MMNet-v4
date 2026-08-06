@@ -6,6 +6,37 @@
 
 ---
 
+## [v4.6.2] - 2026-08-06
+
+### 新增：PatchTST 1D 时序骨干
+
+集成 PatchTST (Patch Time Series Transformer) 作为可选的 1D 时序骨干网络。
+
+#### 新增模型
+
+**SwinYOLOFPNWithPatchTST** (`--variant swin_yolo_patchtst`)
+
+- 使用 PatchTST1D 替代 TemporalFeatureExtractor 作为 1D 分支
+- PatchTST 通过将时序切分为 patches 并使用 Transformer 编码器提取特征
+- 优势：更强的局部模式捕获 + 全局感受野
+
+#### 新增文件
+
+- `models/pe_tsnet_patchtst.py`：PatchTST1D 时序骨干实现
+
+#### Bug 修复
+
+- `estimate_training_time`：warmup epochs 改用实际损失（而非硬编码1.0）
+- `estimate_training_time`：保存/恢复 scheduler 状态（修复 LR 异常衰减）
+- `DETRLoss`：添加 global_density squeeze 消除维度警告
+- 默认学习率统一为 1e-4
+
+#### 任务配置更新
+
+- `tasks/team_baseline.json`：A5 任务改为使用 `swin_yolo_patchtst` variant
+
+---
+
 ## [v4.6.1] - 2026-08-04
 
 ### 修复：三个新变体训练循环错误

@@ -66,6 +66,7 @@ python run_train.py --mode train --variant resnet18 --epochs 150
 | `resnet18` | ResNet-18 + Cross-Attention | ~2GB | 轻量基线，稳定快速 |
 | `swin_yolo` | Swin-Tiny + YOLO-FPN + Cross-Attention | ~4GB | 空间网格定位，图像注意力 |
 | `vit_yolo` | ViT-Small + YOLO-FPN + Cross-Attention | ~3GB | 全局自注意力，轻量 |
+| `swin_yolo_patchtst` | Swin-Tiny + YOLO-FPN + PatchTST | ~4GB | YOLO + PatchTST时序骨干 |
 | `detr` | ResNet-18 + Transformer + Cross-Attention | ~5GB | 全局上下文，100个Object Queries |
 
 ### 训练示例
@@ -75,11 +76,12 @@ python run_train.py --mode train --variant resnet18 --epochs 150
 python run_train.py --variant resnet18 --epochs 150
 
 # YOLO 系列（推荐配合较低学习率）
-python run_train.py --variant swin_yolo --epochs 150 --lr 1e-4 --batch_size 4
-python run_train.py --variant vit_yolo --epochs 150 --lr 1e-4 --batch_size 4
+python run_train.py --variant swin_yolo --epochs 150 --lr 1e-4
+python run_train.py --variant vit_yolo --epochs 150 --lr 1e-4
+python run_train.py --variant swin_yolo_patchtst --epochs 150 --lr 1e-4
 
 # DETR 系列
-python run_train.py --variant detr --epochs 150 --lr 1e-4 --batch_size 4
+python run_train.py --variant detr --epochs 150 --lr 1e-4
 ```
 
 ### 高级优化参数
@@ -122,8 +124,9 @@ project_v4/
 │
 ├── models/                   # 模型定义
 │   ├── pe_tsnet_multimodal.py   # 基础模型 + SE/CoordAtt/CrossAttn
-│   ├── pe_tsnet_yolo.py         # SwinYOLOFPN + ViTYOLOFPN
-│   └── pe_tsnet_detr.py         # DETRStyle
+│   ├── pe_tsnet_yolo.py         # SwinYOLOFPN + ViTYOLOFPN + SwinYOLOFPNWithPatchTST
+│   ├── pe_tsnet_detr.py         # DETRStyle
+│   └── pe_tsnet_patchtst.py     # PatchTST1D 时序骨干
 │
 ├── training/                 # 训练相关
 │   ├── mono_loss.py          # 损失函数（YOLO/DETR/检测/分割）
@@ -169,7 +172,13 @@ project_v4/
 
 ## 版本信息
 
-**当前版本：v4.6.1 (2026-08-05)**
+**当前版本：v4.6.2 (2026-08-06)**
+
+### v4.6.2 新增功能
+
+- **PatchTST 1D 骨干**：新增 `swin_yolo_patchtst` 变体，使用 PatchTST 替代 TemporalFeatureExtractor
+- **默认学习率统一**：所有变体默认 lr=1e-4
+- **训练稳定性修复**：estimate_training_time 使用实际损失并保存 scheduler 状态
 
 ### v4.6.1 修复内容
 
