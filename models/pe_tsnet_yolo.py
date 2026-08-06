@@ -23,6 +23,13 @@ import math
 
 from .pe_tsnet_multimodal import TemporalFeatureExtractor, MultiTaskHead, CrossAttentionFusion
 
+try:
+    from .pe_tsnet_patchtst import PatchTST1D
+    PATCHTST_AVAILABLE = True
+except ImportError:
+    PATCHTST_AVAILABLE = False
+    PatchTST1D = None
+
 
 # =============================================================================
 # 2D 骨干网络：Swin Transformer
@@ -535,4 +542,105 @@ class ViTYOLOFPN(nn.Module):
 
     def count_parameters(self):
         """统计模型参数量"""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+
+# =============================================================================
+# Swin-YOLO with PatchTST 1D 骨干
+# =============================================================================
+
+class SwinYOLOFPNWithPatchTST(nn.Module):
+    """
+    Swin-YOLO-FPN + PatchTST 1D 骨干
+
+    与 SwinYOLOFPN 相同，但 1D 分支使用 PatchTST 替代 TemporalFeatureExtractor
+    """
+
+    def __init__(self, seq_len=300, image_channels=2, image_size=512,
+                 pretrained_2d=True, dropout=0.2, grid_size=16,
+                 patch_size=10, d_model=64, nhead=4, num_layers=2):
+        super().__init__()
+
+        self.seq_len = seq_len
+        self.image_channels = image_channels
+        self.image_size = image_size
+        self.grid_size = grid_size
+
+        # 2D 分支：Swin 骨干 + YOLO Head
+        self.backbone_2d = SwinBackbone2D(
+            pretrained=pretrained_2d,
+            img_size=image_size,
+            in_channels=image_channels
+        )
+        self.yolo_proj = nn.Sequential(
+            nn.Conv2d(768, 256, kernel_size=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True)
+        )
+        self.yolo_head = YOLOFPNHead(in_channels=256, grid_size=grid_size)
+
+        # 1D 分支：PatchTST 时序特征提取
+        if PATCHTST_AVAILABLE:
+            self.backbone_1d = PatchTST1D(
+                seq_len=seq_len,
+                d_model=d_model,
+                nhead=nhead,
+                num_layers=num_layers,
+                dropout=dropout
+            )
+        else:
+            self.backbone_1d = TemporalFeatureExtractor(
+                input_dim=1,
+                hidden_dim=32,
+                num_heads=4,
+                dropout=dropout
+            )
+
+        feat_dim_1d = 64
+
+        # 融合层
+        self.fusion = CrossAttentionFusion(dim_2d=6, dim_1d=feat_dim_1d)
+
+        # 输出头
+        fused_dim = 6 + feat_dim_1d
+        self.output_head = MultiTaskHead(
+            input_dim=fused_dim,
+            hidden_dim=128,
+            dropout=dropout
+        )
+
+    def forward(self, x_1d, x_2d):
+        # 2D 分支：取多尺度特征最后一层
+        multi_scale_features = self.backbone_2d(x_2d)
+        feat = multi_scale_features[-1]  # (B, 768, 16, 16)
+        feat = self.yolo_proj(feat)  # (B, 256, 16, 16)
+        grid_pred = self.yolo_head([feat])  # 传入列表格式
+
+        # 1D 分支
+        feat_1d = self.backbone_1d(x_1d)  # (B, 64)
+
+        # 全局密度
+        global_density = grid_pred[..., 5:6].max(dim=1, keepdim=True)[0]  # (B, 1)
+
+        if self.training:
+            return grid_pred, global_density
+        else:
+            if grid_pred.ndim == 4:
+                B_v, H_v, W_v, C_v = grid_pred.shape
+                grid_pred = grid_pred.permute(0, 3, 1, 2).reshape(B_v, C_v, H_v * W_v)
+                grid_pred = grid_pred.permute(0, 2, 1)
+            elif grid_pred.ndim == 2:
+                grid_pred = grid_pred.unsqueeze(1)
+
+            conf = grid_pred[..., 4:5]
+            best_idx = conf.squeeze(-1).argmax(dim=1)
+            B_f = grid_pred.size(0)
+            grid_feat = grid_pred[torch.arange(B_f, device=grid_pred.device), best_idx]
+
+            fused = self.fusion(grid_feat, feat_1d)
+            output = self.output_head(fused)
+            return output, global_density
+
+    def count_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

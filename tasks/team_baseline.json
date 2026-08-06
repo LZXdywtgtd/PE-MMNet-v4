@@ -41,11 +41,11 @@
   },
   {
     "id": "A5",
-    "name": "Swin-PatchTST",
-    "desc": "升级1D时序骨干为PatchTST，提升热应力时序建模能力",
+    "name": "Swin-YOLO-PatchTST",
+    "desc": "Swin-YOLO基线 + PatchTST 1D时序骨干，提升热应力时序建模",
     "args": "--variant swin_yolo_patchtst --epochs 150 --patience 30 --lr 1e-4",
-    "level": "L2",
-    "time": "~20小时",
+    "level": "L1+",
+    "time": "~18小时",
     "gpu_mem": "~4GB",
     "deps": []
   }

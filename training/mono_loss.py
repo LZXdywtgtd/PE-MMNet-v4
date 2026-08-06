@@ -1056,6 +1056,9 @@ class DETRLoss(nn.Module):
         loss_conf = loss_conf / B
 
         # 密度和单调性损失
+        # global_density: (B,1,1) from model max(), target_density: (B,1)
+        if global_density.ndim == 3:
+            global_density = global_density.squeeze(-1)  # (B,1,1) → (B,1)
         loss_density = F.mse_loss(global_density, target_density)
         loss_mono = torch.abs(global_density - target_density).mean()
 

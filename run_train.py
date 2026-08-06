@@ -93,7 +93,7 @@ from models.pe_tsnet_multimodal import (
     create_model,
     get_arch_specific_config
 )
-from models.pe_tsnet_yolo import SwinYOLOFPN, ViTYOLOFPN
+from models.pe_tsnet_yolo import SwinYOLOFPN, ViTYOLOFPN, SwinYOLOFPNWithPatchTST
 from models.pe_tsnet_detr import DETRStyle
 from training.mono_loss import (
     MultimodalCrackLoss,
@@ -179,7 +179,7 @@ def auto_select_config(args):
     # 2. resnet18 等旧变体默认禁用（FP16 多epoch训练后易产生NaN）
     # 3. 新变体（swin_yolo, vit_yolo, detr）可启用 FP16
     variant = getattr(args, 'variant', 'resnet18')
-    new_variants = ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst', 'vit_yolo_patchtst']
+    new_variants = ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
     is_new_variant = variant in new_variants
 
     if args.no_fp16:
@@ -360,8 +360,8 @@ VARIANT_MODELS = {
     'vit_yolo': ViTYOLOFPN,
     # DETR 变体
     'detr': DETRStyle,
-    # PatchTST 变体（需额外实现）
-    # 'swin_patchtst': SwinYOLOFPN + PatchTST,
+    # PatchTST 变体（Swin-YOLO + PatchTST 1D骨干）
+    'swin_yolo_patchtst': SwinYOLOFPNWithPatchTST,
 }
 
 VARIANT_DISPLAY_NAMES = {
@@ -377,7 +377,7 @@ VARIANT_DISPLAY_NAMES = {
     # DETR 变体
     'detr': 'DETR',
     # PatchTST 变体
-    # 'swin_patchtst': 'Swin-PatchTST',
+    'swin_yolo_patchtst': 'Swin-YOLO-PatchTST',
 }
 
 
@@ -856,7 +856,7 @@ class ETAEstimator:
         }
 
 
-def estimate_training_time(model, train_loader, test_loader, criterion, optimizer, device, config):
+def estimate_training_time(model, train_loader, test_loader, criterion, optimizer, device, config, scheduler=None):
     """
     通过运行 2 个 epoch 测量实际训练速度（状态安全版）
 
@@ -874,10 +874,11 @@ def estimate_training_time(model, train_loader, test_loader, criterion, optimize
     optimizer_state = {k: v.clone() for k, v in optimizer.state_dict().items()}
     was_training = model.training
 
-    # 保存 scheduler 状态（如果有）
+    # 保存 scheduler 状态
     scheduler_state = None
-    if hasattr(model, '_scheduler'):
-        scheduler_state = copy.deepcopy(model._scheduler.state_dict())
+    if scheduler is not None:
+        scheduler_state = {k: (v.clone() if isinstance(v, torch.Tensor) else v)
+                         for k, v in scheduler.state_dict().items()}
 
     times = []
     model.train()
@@ -906,19 +907,19 @@ def estimate_training_time(model, train_loader, test_loader, criterion, optimize
             optimizer.zero_grad()
             if fp16_enabled:
                 with torch.amp.autocast('cuda'):
-                    is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
-                    if is_new_variant:
-                        output, _ = model(seq_1d, img_2d)  # 返回 (outputs, global_density)
-                        # 新变体跳过（估算阶段不计算精确损失）
-                        loss = torch.tensor(1.0, device=device, requires_grad=True)
+                    output = model(seq_1d, img_2d)
+                    if task == 'segmentation':
+                        loss = criterion(output, labels)
+                    elif task == 'multitask':
+                        loss = criterion(output, labels)
+                    elif variant_key in ['swin_yolo', 'vit_yolo']:
+                        assigned_target, pos_mask = assigner(labels)
+                        loss = criterion(output, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                    elif variant_key == 'detr':
+                        indices = matcher(output, {'labels': labels})
+                        loss = criterion(output, {'labels': labels}, global_density, labels[:, 5:6], indices)
                     else:
-                        output = model(seq_1d, img_2d)
-                        if task == 'segmentation':
-                            loss = criterion(output, labels)
-                        elif task == 'multitask':
-                            loss = criterion(output, labels)
-                        else:
-                            loss, _ = criterion(output, labels)
+                        loss, _ = criterion(output, labels)
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -926,18 +927,19 @@ def estimate_training_time(model, train_loader, test_loader, criterion, optimize
                 scaler.update()
             else:
                 with torch.amp.autocast('cuda', enabled=False):
-                    is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr']
-                    if is_new_variant:
-                        output, _ = model(seq_1d, img_2d)
-                        loss = torch.tensor(1.0, device=device, requires_grad=True)
+                    output = model(seq_1d, img_2d)
+                    if task == 'segmentation':
+                        loss = criterion(output, labels)
+                    elif task == 'multitask':
+                        loss = criterion(output, labels)
+                    elif variant_key in ['swin_yolo', 'vit_yolo']:
+                        assigned_target, pos_mask = assigner(labels)
+                        loss = criterion(output, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                    elif variant_key == 'detr':
+                        indices = matcher(output, {'labels': labels})
+                        loss = criterion(output, {'labels': labels}, global_density, labels[:, 5:6], indices)
                     else:
-                        output = model(seq_1d, img_2d)
-                        if task == 'segmentation':
-                            loss = criterion(output, labels)
-                        elif task == 'multitask':
-                            loss = criterion(output, labels)
-                        else:
-                            loss, _ = criterion(output, labels)
+                        loss, _ = criterion(output, labels)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
@@ -956,6 +958,8 @@ def estimate_training_time(model, train_loader, test_loader, criterion, optimize
     # 恢复训练状态
     model.load_state_dict(model_state)
     optimizer.load_state_dict(optimizer_state)
+    if scheduler_state is not None:
+        scheduler.load_state_dict(scheduler_state)
     if was_training:
         model.train()
 
@@ -1040,7 +1044,8 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
     if config.get('do_estimate', True) and config['epochs'] >= 10:
         try:
             _, est_total_minutes = estimate_training_time(
-                model, train_loader, test_loader, criterion, optimizer, device, config
+                model, train_loader, test_loader, criterion, optimizer, device, config,
+                scheduler=scheduler
             )
             hours = est_total_minutes / 60
             print_info(f"[预估] 总训练时间: ~{hours:.1f}小时 (基于前2轮测量)")
@@ -1718,7 +1723,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=150, help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=None,
                         help='批次大小，不指定则自动根据显存选择')
-    parser.add_argument('--lr', type=float, default=3e-4, help='学习率')
+    parser.add_argument('--lr', type=float, default=1e-4, help='学习率（统一默认，微调友好）')
     parser.add_argument('--dropout', type=float, default=0.2, help='Dropout')
     parser.add_argument('--patience', type=int, default=30, help='早停耐心值')
     parser.add_argument('--lambda_mono', type=float, default=0.1, help='单调性损失权重')
@@ -1728,7 +1733,7 @@ def main():
     # 模型
     parser.add_argument('--variant', type=str, default='resnet18',
                         choices=['1d_only', '2d_only', 'concat', 'add', 'cross_attn', 'resnet18',
-                                'swin_yolo', 'vit_yolo', 'detr'],
+                                'swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst'],
                         help='模型变体（train模式）')
 
     # 架构配置（train模式，可选）
