@@ -166,7 +166,7 @@ class GatedMultimodalFusion(nn.Module):
             feat_1d: 1D时序特征 (B, dim_1d)
 
         Returns:
-            (B, dim_1d) - 融合后的特征
+            (B, dim_2d + dim_1d) - 融合后的特征，拼接原始2D特征与门控融合结果
         """
         # 分割2D特征为温度子空间和应力子空间
         temp_feat = feat_2d[:, :self.temp_channels]
@@ -182,9 +182,10 @@ class GatedMultimodalFusion(nn.Module):
         # 门控融合
         gate_temp = gate_weight[:, 0:1]  # (B, 1)
         gate_stress = gate_weight[:, 1:2]  # (B, 1)
-        fused = gate_temp * temp_out + gate_stress * stress_out  # (B, dim_1d)
+        gated = gate_temp * temp_out + gate_stress * stress_out  # (B, dim_1d)
 
-        return fused
+        # 拼接原始2D特征与门控融合结果，保持与 CrossAttentionFusion 输出维度一致
+        return torch.cat([feat_2d, gated], dim=-1)  # (B, dim_2d + dim_1d)
 
 
 class AdaptiveFusion(nn.Module):

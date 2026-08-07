@@ -341,9 +341,10 @@ class SwinYOLOFPN(nn.Module):
         self.image_channels = image_channels
         self.image_size = image_size
         self.grid_size = grid_size
-        # 动态计算实际网格数（Swin stride=32，img_size/32 得到网格尺寸）
-        # 例如: img_size=256 → 8×8=64 网格; img_size=512 → 16×16=256 网格
-        self.actual_grid_size = image_size // 32
+        # 实际网格尺寸：YOLO Head 固定输出 grid_size×grid_size=16×16=256 个预测
+        # 注：特征图实际大小为 image_size//32，但 YOLO head 会将特征图视为 16×16
+        # 因此 actual_grid_size 应与 grid_size 保持一致，以确保 assigner 分配正确
+        self.actual_grid_size = grid_size  # = 16
         self.actual_num_grids = self.actual_grid_size ** 2
 
         # 2D 分支：Swin 骨干 + 直接 YOLO Head（跳过 FPN，简化架构）
@@ -573,8 +574,8 @@ class SwinYOLOFPNWithPatchTST(nn.Module):
         self.image_channels = image_channels
         self.image_size = image_size
         self.grid_size = grid_size
-        # 动态计算实际网格数（Swin stride=32）
-        self.actual_grid_size = image_size // 32
+        # 实际网格尺寸：YOLO Head 固定输出 grid_size×grid_size=16×16=256
+        self.actual_grid_size = grid_size  # = 16
         self.actual_num_grids = self.actual_grid_size ** 2
 
         # 2D 分支：Swin 骨干 + YOLO Head

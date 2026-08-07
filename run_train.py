@@ -739,9 +739,11 @@ def staged_training(variant_key, config, device, data_roots=None, task_id=None):
         pretrained_2d=True,
         dropout=config['dropout'],
     )
-    # 只有 PETSNetMultimodal(resnet18) 支持 task 参数
+    # PETSNetMultimodal(resnet18) 额外参数
     if variant_key == 'resnet18':
         model_kwargs['task'] = config.get('task', 'detection')
+        model_kwargs['fusion'] = config.get('fusion', 'cross_attn')
+        model_kwargs['seq_channels'] = 3 if config.get('triple_channel') else 1
     model = ModelClass(**model_kwargs)
     model = model.to(device)
 
