@@ -272,9 +272,8 @@ class DETRStyle(nn.Module):
         self.d_model = d_model
         self.num_queries = num_queries
 
-        # 特征图尺寸（ResNet-18 最终特征图）
-        # ResNet-18 stride=32：256 / 32 = 8 grids
-        self.feat_size = 8  # 256 / 32 = 8
+        # 特征图尺寸（ResNet-18 stride=32：image_size / 32）
+        self.feat_size = image_size // 32
 
         # 2D 骨干：ResNet-18（启用空间特征输出）
         self.backbone_2d = ResNet18Backbone2D(

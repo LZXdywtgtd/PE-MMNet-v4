@@ -595,21 +595,24 @@ def eval_checkpoint(checkpoint_path, device, image_size=None):
     # 创建模型
     if variant_key == 'resnet18':
         model = PETSNetMultimodal(
-            seq_len=300,
+            seq_len=saved_config.get('feature_len', 300),
             image_channels=2,
             image_size=image_size,
             pretrained_2d=True,
+            dropout=saved_config.get('dropout', 0.2),
             task=task,
-            fusion=saved_config.get('fusion', 'cross_attn')
+            fusion=saved_config.get('fusion', 'cross_attn'),
+            seq_channels=saved_config.get('seq_channels', 1)
         )
     elif variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']:
         # YOLO/DETR 变体
         ModelClass = VARIANT_MODELS.get(variant_key, PETSNetMultimodal)
         model = ModelClass(
-            seq_len=300,
+            seq_len=saved_config.get('feature_len', 300),
             image_channels=2,
             image_size=image_size,
-            pretrained_2d=True
+            pretrained_2d=True,
+            dropout=saved_config.get('dropout', 0.2)
         )
     else:
         ModelClass = VARIANT_MODELS.get(variant_key, PETSNetMultimodal)
@@ -727,7 +730,8 @@ def staged_training(variant_key, config, device, data_roots=None, task_id=None):
         remove_contours=config.get('remove_contours', False),
         disabled_batches=config.get('disabled_batches', []),
         task=config.get('task', 'detection'),
-        triple_channel=config.get('triple_channel', False)
+        triple_channel=config.get('triple_channel', False),
+        cutmix_prob=config.get('aug_cutmix_prob', 0.0)
     )
 
     # 创建模型
@@ -746,6 +750,22 @@ def staged_training(variant_key, config, device, data_roots=None, task_id=None):
         model_kwargs['seq_channels'] = 3 if config.get('triple_channel') else 1
     model = ModelClass(**model_kwargs)
     model = model.to(device)
+
+    # 坐标注意力集成（与 train_variant 保持一致）
+    if config.get('use_coord_attn'):
+        backbone_name = None
+        if hasattr(model, 'branch_2d'):
+            backbone_name = 'branch_2d'
+        elif hasattr(model, 'backbone_2d'):
+            backbone_name = 'backbone_2d'
+        if backbone_name:
+            backbone = getattr(model, backbone_name)
+            if hasattr(backbone, 'set_spatial_output'):
+                backbone.set_spatial_output(True)
+            from models.pe_tsnet_multimodal import BackboneWithAttention
+            setattr(model, backbone_name, BackboneWithAttention(
+                backbone, attention_type='coord', reduction=16))
+            print_info(f"[OK] 坐标注意力已启用")
 
     # 阶段1训练
     model, _ = train_model(model, train_loader_1, test_loader_1, phase1_config, device, task_id=task_id)
@@ -772,7 +792,8 @@ def staged_training(variant_key, config, device, data_roots=None, task_id=None):
         remove_contours=config.get('remove_contours', False),
         disabled_batches=config.get('disabled_batches', []),
         task=config.get('task', 'detection'),
-        triple_channel=config.get('triple_channel', False)
+        triple_channel=config.get('triple_channel', False),
+        cutmix_prob=config.get('aug_cutmix_prob', 0.0)
     )
 
     # 阶段2配置（使用剩余的epoch）
@@ -1189,11 +1210,8 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 lambda_conf=1.0,
                 lambda_mono=0.1
             )
-            # swin 变体：动态获取实际网格尺寸（Swin stride=32）
-            if variant_key in ['swin_yolo', 'swin_yolo_patchtst']:
-                actual_grid_size = model.actual_grid_size
-            else:
-                actual_grid_size = 16  # vit_yolo 输出固定 16×16
+            # 所有 YOLO 变体：动态获取实际网格尺寸
+            actual_grid_size = model.actual_grid_size
             assigner = YOLOTargetAssigner(grid_size=actual_grid_size, nearby_range=2)
         elif variant_key == 'detr':
             matcher = HungarianMatcher()
@@ -1520,25 +1538,15 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
                 if is_new_variant:
                     if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
-                        model_output, global_density = model(seq_1d, img_2d)
-                        # 推理模式：model_output 是 (B, 6)，需要适配后计算损失
-                        if model_output.ndim == 3:
-                            # 训练模式（完整网格预测）
-                            grid_pred = model_output
-                            assigned_target, pos_mask = assigner(labels)
-                            loss_total = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
-                        else:
-                            # 推理模式：将 (B, 6) 转为 (B, N, 6) 以计算损失
-                            B_v = model_output.size(0)
-                            actual_num_grids = model.actual_num_grids
-                            grid_pred = model_output.unsqueeze(1).expand(-1, actual_num_grids, -1)  # (B, N, 6)
-                            # 分配目标：每个网格都分配完整目标
-                            assigned_target, pos_mask = assigner(labels)
-                            # 所有网格都标记为正样本（推理模式简化处理）
-                            pos_mask = torch.ones(B_v, actual_num_grids, dtype=torch.bool, device=model_output.device)
-                            loss_total = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
-                        # 收集完整 6 维输出用于指标计算
-                        all_preds.append(model_output.cpu())
+                        # 临时切换到训练模式以获取完整网格预测计算有意义的验证损失
+                        model.train()
+                        grid_pred, global_density = model(seq_1d, img_2d)  # (B, N, 6)
+                        model.eval()  # 恢复 eval 模式用于预测收集
+                        assigned_target, pos_mask = assigner(labels)
+                        loss_total = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
+                        # eval 模式的最佳预测用于指标收集
+                        best_pred, _ = model(seq_1d, img_2d)  # (B, 6)
+                        all_preds.append(best_pred.cpu())
                         all_targets.append(labels[:, :6].cpu())
                     else:  # detr
                         # DETR eval 模式：model_output 是 (B, 6) 最佳预测
@@ -2001,14 +2009,25 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
     model = model.to(device)
 
     # 坐标注意力集成
-    if use_coord_attn and hasattr(model, 'branch_2d'):
-        from models.pe_tsnet_multimodal import BackboneWithAttention
-        model.branch_2d = BackboneWithAttention(
-            model.branch_2d,
-            attention_type='coord',
-            reduction=16
-        )
-        print_info(f"[OK] 坐标注意力已启用")
+    if use_coord_attn:
+        backbone_name = None
+        if hasattr(model, 'branch_2d'):
+            backbone_name = 'branch_2d'
+        elif hasattr(model, 'backbone_2d'):
+            backbone_name = 'backbone_2d'
+
+        if backbone_name:
+            backbone = getattr(model, backbone_name)
+            # 启用空间特征图输出，使 CoordAtt 能作用于 (B,C,H,W) 而非 (B,C)
+            if hasattr(backbone, 'set_spatial_output'):
+                backbone.set_spatial_output(True)
+            from models.pe_tsnet_multimodal import BackboneWithAttention
+            setattr(model, backbone_name, BackboneWithAttention(
+                backbone,
+                attention_type='coord',
+                reduction=16
+            ))
+            print_info(f"[OK] 坐标注意力已启用")
 
     # 加载数据
     print_info("加载数据集...")

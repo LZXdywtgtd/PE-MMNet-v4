@@ -110,12 +110,16 @@ class PatchTST1D(nn.Module):
         前向传播
 
         Args:
-            x: 输入序列 (B, seq_len)
+            x: 输入序列 (B, seq_len) 或 (B, num_channels, seq_len) for triple_channel
 
         Returns:
             (B, output_dim) - 时序特征
         """
         batch_size = x.size(0)
+
+        # 支持 triple_channel: (B, 3, seq_len) → 对通道维度取均值 → (B, seq_len)
+        if x.dim() == 3:
+            x = x.mean(dim=1)  # (B, seq_len)
 
         # 截断到 adjusted_seq_len（如需要）
         if self.adjusted_seq_len < self.seq_len:

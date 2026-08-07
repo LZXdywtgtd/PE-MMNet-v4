@@ -463,12 +463,14 @@ class ViTYOLOFPN(nn.Module):
         self.image_channels = image_channels
         self.image_size = image_size
         self.grid_size = grid_size
-        # ViT 输出固定 16×16=256 网格
-        self.actual_grid_size = 16
-        self.actual_num_grids = 256
+        # 动态计算网格尺寸：至少 16，大图可更大
+        # 确保是 16 的倍数以适配 YOLO head
+        computed_grid = image_size // 32
+        self.actual_grid_size = max(16, (computed_grid // 4) * 4)  # 256→16, 512→16, 1024→20
+        self.actual_num_grids = self.actual_grid_size ** 2
 
         # 2D 分支：ViT 骨干 + 简化 FPN + YOLO Head
-        self.backbone_2d = ViTYOLOBackbone2D(pretrained=pretrained_2d, output_size=grid_size)
+        self.backbone_2d = ViTYOLOBackbone2D(pretrained=pretrained_2d, output_size=self.actual_grid_size)
 
         # 简化的 FPN（单层）
         self.fpn = nn.Sequential(
