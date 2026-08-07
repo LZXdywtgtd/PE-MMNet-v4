@@ -6,6 +6,29 @@
 
 ---
 
+## [v4.6.5] - 2026-08-07
+
+### 新增：检查点系统全面重构
+
+#### 配置签名校验
+- 新增 `SIGNATURE_KEYS`（14 个关键字段）、`_compute_config_signature`、`_check_signature_mismatch`
+- 配置变更（image_size、fusion、triple_channel 等）时自动备份旧检查点到 `checkpoints/backup/`
+
+#### Epoch 目标数智能变更
+- 支持已完成训练延长 epoch 数（自动从断点继续）
+- `checkpoint['epoch']` 改为 1-indexed（保存时 `epoch + 1`）
+
+#### 分层目录 + 精简命名
+- 检查点按变体分子目录：`checkpoints/{variant}/`
+- 新命名格式：`{variant}_{task}_off{offset}_{best|last}.pt`
+- 新增 `migrate_old_checkpoints()` 自动迁移旧格式文件
+
+#### 团队协作优化
+- `team_train.py` 跳过 `examples.json` 等模板文件
+- `rglob` 递归扫描支持子目录
+
+---
+
 ## [v4.6.4] - 2026-08-07
 
 ### 修复：全链路数据流审计 P1 Bug
