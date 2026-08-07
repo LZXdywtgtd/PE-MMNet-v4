@@ -490,22 +490,117 @@ def _get_task_checkpoint_info(task_id: str) -> dict:
     variant = _extract_arg(args_str, '--variant') or 'resnet18'
     task_mode = _extract_arg(args_str, '--task') or 'detection'
     offset = _extract_arg(args_str, '--predict_offset') or '0'
-    subdir = CHECKPOINT_DIR / variant
-    ckpt_path = subdir / f"{variant}_{task_mode}_off{offset}_best.pt"
-    last_path = subdir / f"{variant}_{task_mode}_off{offset}_last.pt"
 
-    for path in [ckpt_path, last_path]:
+    # 新格式路径：checkpoints/{variant}/{variant}_{task}_off{offset}_best.pt
+    subdir = CHECKPOINT_DIR / variant
+    new_best = subdir / f"{variant}_{task_mode}_off{offset}_best.pt"
+    new_last = subdir / f"{variant}_{task_mode}_off{offset}_last.pt"
+
+    # 旧格式路径：checkpoints/{variant}_{backbone2d}_{backbone1d}/{variant}_{...}_task{...}_offset{...}_best.pt
+    # variant 本身可能带下划线（如 swin_yolo_patchtst），目录名通常等于 variant 名
+    old_subdir = CHECKPOINT_DIR / variant
+    old_best = old_subdir / f"{variant}_{task_mode}_offset{offset}_best.pt"
+    old_last = old_subdir / f"{variant}_{task_mode}_offset{offset}_last.pt"
+    # 备用旧格式（variant 作为前缀，如 resnet18_resnet18_cnn/）
+    old_best_alt = old_subdir / f"{variant}_{task_mode}_offset{offset}_best.pt"
+    old_last_alt = old_subdir / f"{variant}_{task_mode}_offset{offset}_last.pt"
+
+    # 旧格式更复杂：子目录名等于 variant（如 resnet18_resnet18_cnn），文件前缀也是 variant
+    # 但 variant 内部下划线导致目录名和文件名前缀相同（如 resnet18_resnet18_cnn）
+    # 对 swin_yolo：目录名=swin_yolo，文件前缀=swin_yolo_patchtst_resnet18_cnn...
+    # 对 detr：目录名=detr_resnet18_cnn，文件前缀=detr_resnet18_cnn
+    # 对 resnet18：目录名=resnet18_resnet18_cnn，文件前缀=resnet18_resnet18_cnn
+    # 对 swin_yolo_patchtst：目录名=swin_yolo_patchtst_resnet18_cnn，文件前缀=swin_yolo_patchtst_resnet18_cnn
+    # 统一策略：在 variant 子目录下找 _task{}_offset{}_best.pt 结尾的文件
+    old_task_pattern = re.compile(
+        rf'^{re.escape(variant)}.+?_{re.escape(task_mode)}_offset{re.escape(offset)}_(?:_e\d+_)?(best|last)\.pt$'
+    )
+
+    def load_ckpt(path):
         if path.exists():
             try:
                 ckpt = torch.load(path, map_location='cpu', weights_only=False)
                 return {
                     'epoch': ckpt.get('epoch', 0),
                     'is_complete': ckpt.get('is_complete', False),
-                    'path': path.name
+                    'path': str(path)
                 }
             except Exception:
                 pass
-    return {'epoch': 0, 'is_complete': False, 'path': None}
+        return None
+
+    # 收集所有匹配的文件（best 和 last），取最大 epoch 和综合 is_complete
+    # 新格式：{prefix}_e{epoch:03d}_best.pt，旧格式：{prefix}_best.pt
+    all_results = []
+
+    # 1. 新格式优先（直接路径查找）
+    for path in [new_best, new_last]:
+        result = load_ckpt(path)
+        if result:
+            all_results.append(result)
+
+    # 2. variant 子目录下扫描（匹配新旧两种格式）
+    if old_subdir.exists():
+        # 新格式：_e???_best.pt / _e???_last.pt
+        for ckpt_file in old_subdir.glob('*_e*_best.pt'):
+            if old_task_pattern.match(ckpt_file.name):
+                result = load_ckpt(ckpt_file)
+                if result:
+                    all_results.append(result)
+        for ckpt_file in old_subdir.glob('*_e*_last.pt'):
+            if old_task_pattern.match(ckpt_file.name):
+                result = load_ckpt(ckpt_file)
+                if result:
+                    all_results.append(result)
+        # 旧格式：_best.pt / _last.pt（无 epoch）
+        for ckpt_file in old_subdir.glob('*_best.pt'):
+            if 'e' in ckpt_file.stem and '_best' in ckpt_file.name:
+                continue  # 已在上面匹配
+            if old_task_pattern.match(ckpt_file.name):
+                result = load_ckpt(ckpt_file)
+                if result:
+                    all_results.append(result)
+        for ckpt_file in old_subdir.glob('*_last.pt'):
+            if 'e' in ckpt_file.stem and '_last' in ckpt_file.name:
+                continue
+            if old_task_pattern.match(ckpt_file.name):
+                result = load_ckpt(ckpt_file)
+                if result:
+                    all_results.append(result)
+
+    # 3. 回退：递归扫描所有子目录
+    for ckpt_file in CHECKPOINT_DIR.rglob('*_e*_best.pt'):
+        if 'backup' in ckpt_file.parts:
+            continue
+        if old_task_pattern.match(ckpt_file.name):
+            result = load_ckpt(ckpt_file)
+            if result:
+                all_results.append(result)
+    for ckpt_file in CHECKPOINT_DIR.rglob('*_e*_last.pt'):
+        if 'backup' in ckpt_file.parts:
+            continue
+        if old_task_pattern.match(ckpt_file.name):
+            result = load_ckpt(ckpt_file)
+            if result:
+                all_results.append(result)
+
+    if not all_results:
+        return {'epoch': 0, 'is_complete': False, 'path': None}
+
+    # 分别取 best 和 last 的 epoch，综合 is_complete
+    best_result = next((r for r in all_results if 'best.pt' in r['path']), None)
+    last_result = next((r for r in all_results if 'last.pt' in r['path']), None)
+    best_epoch = best_result['epoch'] if best_result else 0
+    last_epoch = last_result['epoch'] if last_result else 0
+    max_epoch = max(best_epoch, last_epoch)
+    any_complete = any(r['is_complete'] for r in all_results)
+    return {
+        'epoch': max_epoch,
+        'best_epoch': best_epoch,
+        'last_epoch': last_epoch,
+        'is_complete': any_complete,
+        'path': last_result['path'] if last_result else (best_result['path'] if best_result else None)
+    }
 
 
 def _extract_arg(args_str: str, arg: str) -> str:
@@ -516,74 +611,179 @@ def _extract_arg(args_str: str, arg: str) -> str:
     return match.group(1) if match else None
 
 
-def _print_execution_plan():
-    """打印执行计划（依赖树 + 检查点状态）"""
+def _get_task_depth(task_id, visited=None):
+    """计算任务依赖深度"""
+    if visited is None:
+        visited = set()
+    if task_id in visited:
+        return 0
+    visited.add(task_id)
+    task = all_tasks.get(task_id, {})
+    deps = task.get('deps', [])
+    if not deps:
+        return 0
+    return 1 + max((_get_task_depth(d, visited) for d in deps), default=0)
+
+
+def _print_progress_table(title=None, last_done=None, newly_unlocked=None):
+    """打印实时任务进度表
+
+    Args:
+        title: 表格标题（首次显示时用）
+        last_done: 刚完成的任务ID（显示结果）
+        newly_unlocked: 刚解锁的任务ID列表（高亮显示）
+    """
     completed = get_completed_tasks()
     hardware_level, _ = get_hardware_level()
 
-    print(f"\n{'=' * 60}")
-    print(f"  执行计划预览")
-    print(f"{'=' * 60}")
-
-    # 按依赖深度分层显示
-    def get_depth(task_id, visited=None):
-        if visited is None:
-            visited = set()
-        if task_id in visited:
-            return 0
-        visited.add(task_id)
-        task = all_tasks.get(task_id, {})
-        deps = task.get('deps', [])
-        if not deps:
-            return 0
-        return 1 + max((get_depth(d, visited) for d in deps), default=0)
-
-    # 收集所有任务的深度和状态
+    # 收集所有任务状态
     task_info = {}
     for task_id in all_tasks:
         status = get_task_status(task_id, completed, hardware_level)
         ckpt_info = _get_task_checkpoint_info(task_id)
-        depth = get_depth(task_id)
+        depth = _get_task_depth(task_id)
         task_info[task_id] = {
             'status': status,
             'depth': depth,
             'epoch': ckpt_info['epoch'],
+            'best_epoch': ckpt_info.get('best_epoch', 0),
+            'last_epoch': ckpt_info.get('last_epoch', 0),
             'is_complete': ckpt_info['is_complete'],
         }
 
-    # 打印每个深度的任务
-    for depth in range(max(t['depth'] for t in task_info.values()) + 1):
-        tasks_at_depth = [(tid, info) for tid, info in task_info.items() if info['depth'] == depth]
-        tasks_at_depth.sort(key=lambda x: x[0])
-        indent = "  " * depth
+    def _target_epochs(tid):
+        return int(_extract_arg(all_tasks[tid].get('args', ''), '--epochs') or 0)
+
+    # 统计各状态数量（用 last_epoch 判断是否真正完成）
+    stat_done = 0
+    stat_exec = 0
+    stat_lock = 0
+    stat_interrupted = 0
+    for tid, i in task_info.items():
+        target = _target_epochs(tid)
+        if i['is_complete'] and i['last_epoch'] > 0 and i['last_epoch'] >= target:
+            stat_done += 1
+        elif i['status'] == 'locked':
+            stat_lock += 1
+        elif i['last_epoch'] == 0 and i['status'] in ('executable', 'warning'):
+            stat_exec += 1
+        elif i['last_epoch'] > 0 and i['status'] != 'locked':
+            stat_interrupted += 1
+
+    # 打印标题行
+    sep = f"{'─' * 100}"
+    print(f"\n{sep}")
+    if title:
+        print(f"  {title}")
+    else:
+        print(f"  团队训练进度 ({stat_done}/{len(all_tasks)} 任务)")
+    print(sep)
+
+    # 打印图例（仅首次显示）
+    if title:
+        print(f"{COLORS['green']}✓已完成{COLORS['reset']}  "
+              f"{COLORS['yellow']}⏸中断{COLORS['reset']}  "
+              f"{COLORS['blue']}▶待执行{COLORS['reset']}  "
+              f"{COLORS['gray']}🔒等待依赖{COLORS['reset']}")
+
+    # 按深度分层打印
+    max_depth = max(t['depth'] for t in task_info.values()) if task_info else 0
+    for depth in range(max_depth + 1):
+        tasks_at_depth = sorted(
+            [(tid, info) for tid, info in task_info.items() if info['depth'] == depth],
+            key=lambda x: x[0]
+        )
         for task_id, info in tasks_at_depth:
             task = all_tasks[task_id]
-            deps_str = f" ← {', '.join(task.get('deps', []))}" if task.get('deps') else ""
+            deps = task.get('deps', [])
+            deps_str = ', '.join(deps) if deps else '无'
 
-            # 状态图标
-            if info['is_complete']:
-                icon = f"{COLORS['green']}✓已完成{COLORS['reset']}"
+            # 状态图标 + 文字
+            # 真正完成：last_epoch >= 目标 epoch 数（last.pt 代表最终训练结果）
+            target_epochs = int(_extract_arg(task.get('args', ''), '--epochs') or 0)
+            is_done = info['is_complete'] and info['last_epoch'] > 0 and info['last_epoch'] >= target_epochs
+            is_newly = task_id in (newly_unlocked or [])
+            is_last = task_id == last_done
+
+            # 检查点信息：best:N/T last:N/T，N 和 T 固定3位宽（新任务时显示"新任务"）
+            if info['best_epoch'] > 0 or info['last_epoch'] > 0:
+                t = target_epochs
+                ckpt_txt = f"best:{info['best_epoch']:3d}/{t:3d} last:{info['last_epoch']:3d}/{t:3d}"
+            else:
+                ckpt_txt = ""
+
+            if is_done:
+                icon = f"{COLORS['green']}✓{COLORS['reset']}"
+                state_txt = f"{COLORS['green']}已完成{COLORS['reset']}"
             elif info['status'] == 'locked':
-                icon = f"{COLORS['gray']}🔒锁定{COLORS['reset']}"
+                icon = f"{COLORS['gray']}🔒{COLORS['reset']}"
+                state_txt = f"{COLORS['gray']}等待依赖{COLORS['reset']}"
+                ckpt_txt = ""
+            elif info['last_epoch'] > 0:
+                # 有检查点但未真正完成：中断（按 last_epoch 判断）
+                icon = f"{COLORS['yellow']}⏸{COLORS['reset']}"
+                state_txt = f"{COLORS['yellow']}中断{COLORS['reset']}"
             elif info['status'] == 'warning':
-                icon = f"{COLORS['yellow']}!显存警告{COLORS['reset']}"
+                icon = f"{COLORS['yellow']}!{COLORS['reset']}"
+                state_txt = f"{COLORS['blue']}待执行{COLORS['reset']}"
+                ckpt_txt = "新任务"
             elif info['status'] == 'executable':
-                icon = f"{COLORS['cyan']}▶待执行{COLORS['reset']}"
+                icon = f"{COLORS['blue']}▶{COLORS['reset']}"
+                state_txt = f"{COLORS['blue']}待执行{COLORS['reset']}"
+                ckpt_txt = "新任务"
             else:
-                icon = f"{COLORS['gray']}?未知{COLORS['reset']}"
+                icon = f"{COLORS['gray']}?{COLORS['reset']}"
+                state_txt = f"{COLORS['gray']}未知{COLORS['reset']}"
+                ckpt_txt = ""
 
-            # 检查点信息
-            if info['is_complete']:
-                ckpt_str = f"Epoch {info['epoch']}/{task.get('args', '')}"
-            elif info['epoch'] > 0:
-                ckpt_str = f"{COLORS['yellow']}中断于 Epoch {info['epoch']}{COLORS['reset']}"
-            else:
-                ckpt_str = "新任务"
+            # 高亮刚完成/刚解锁的任务
+            marker = ""
+            if is_last:
+                marker = f" {COLORS['green']}[刚完成]{COLORS['reset']}"
+            elif is_newly:
+                marker = f" {COLORS['blue']}[刚解锁]{COLORS['reset']}"
 
-            print(f"{indent}├── [{task_id}] {task['name']} {icon}")
-            print(f"{indent}│   {ckpt_str}{deps_str}")
+            # 计算显示宽度（中文占2格）+ 按显示宽度截断/填充
+            def display_len(s):
+                import re
+                plain = re.sub(r'\x1b\[[0-9;]*m', '', s)
+                return len(plain) + len(re.findall(r'[一-鿿]', plain))
 
-    print(f"{'=' * 60}\n")
+            def pad(s, width):
+                dl = display_len(s)
+                return s + ' ' * max(0, width - dl)
+
+            def truncate_by_display(text, max_w):
+                result = []
+                cur = 0
+                for ch in text:
+                    if '一' <= ch <= '鿿':
+                        cur += 2
+                    else:
+                        cur += 1
+                    if cur > max_w:
+                        break
+                    result.append(ch)
+                return ''.join(result)
+
+            name = truncate_by_display(task['name'], 26)
+            state_col = 12
+            ckpt_col = 22
+            print(f"  {icon} [{task_id}] {pad(name, 26)} {pad(state_txt, state_col)} {pad(ckpt_txt, ckpt_col)}  依赖: [{deps_str}]{marker}")
+
+    # 底部统计
+    print(sep)
+    stats_parts = []
+    if stat_done > 0:
+        stats_parts.append(f"{COLORS['green']}✓{stat_done}{COLORS['reset']} 已完成")
+    if stat_interrupted > 0:
+        stats_parts.append(f"{COLORS['yellow']}⏸{stat_interrupted}{COLORS['reset']} 中断")
+    if stat_exec > 0:
+        stats_parts.append(f"{COLORS['blue']}▶{stat_exec}{COLORS['reset']} 待执行")
+    if stat_lock > 0:
+        stats_parts.append(f"{COLORS['gray']}🔒{stat_lock}{COLORS['reset']} 等待")
+    print(f"  统计: {'  '.join(stats_parts)}")
+    print(sep)
 
 
 def auto_run_executable(force_warnings=False):
@@ -591,44 +791,29 @@ def auto_run_executable(force_warnings=False):
 
     每次任务完成后重新扫描依赖状态，新解锁的任务会立即加入执行队列。
     优先恢复被中断的任务（is_complete=False）。"""
-
     hardware_level, _ = get_hardware_level()
     total_tasks = len(all_tasks)
 
-    # 启动前打印执行计划
-    _print_execution_plan()
-
-    # 动态扫描：每次执行后重新获取已完成状态
+    # 动态扫描
     def get_next_task():
-        """获取下一个可执行且未被执行过的任务（优先恢复被中断的）"""
         completed = get_completed_tasks()
-        interrupted = []  # 被中断的任务（优先）
-        executable = []  # 正常可执行
-
+        interrupted, executable = [], []
         for task_id in all_tasks:
             status = get_task_status(task_id, completed, hardware_level)
             if status not in ('executable', 'warning'):
                 continue
             ckpt_info = _get_task_checkpoint_info(task_id)
             if ckpt_info['epoch'] > 0 and not ckpt_info['is_complete']:
-                interrupted.append(task_id)  # 被中断，优先恢复
+                interrupted.append(task_id)
             else:
                 executable.append(task_id)
-
-        # 优先返回被中断的任务，其次按任务ID排序
         if interrupted:
             return sorted(interrupted)[0], 'executable'
         if executable:
             return sorted(executable)[0], 'executable'
         return None, None
 
-    # 统计
-    success_count = 0
-    fail_count = 0
-    skip_count = 0
-    started_tasks = set()  # 记录已启动过的任务（避免重复）
-
-    # 首次扫描：检查是否有任何可执行任务
+    # 首次扫描
     first_task, _ = get_next_task()
     if first_task is None:
         completed = get_completed_tasks()
@@ -636,20 +821,26 @@ def auto_run_executable(force_warnings=False):
         return
 
     mode_str = "强制" if force_warnings else "标准"
-    print(f"\n{COLORS['bold']}自动执行模式 ({mode_str}){COLORS['reset']}")
-    print(f"总任务: {total_tasks} | 实时检测依赖满足情况\n")
+    print(f"\n{COLORS['bold']}自动执行模式 ({mode_str}){COLORS['reset']} | "
+          f"总任务: {total_tasks} | 每次任务完成后刷新进度\n")
 
+    # 首次打印进度表（带图例）
+    _print_progress_table(title=f"团队训练进度 ({total_tasks} 任务)", last_done=None, newly_unlocked=None)
+
+    success_count, fail_count, skip_count = 0, 0, 0
+    started_tasks = set()
     task_idx = 0
+    last_done = None
+
     while True:
         task_id, status = get_next_task()
         if task_id is None:
-            break  # 无更多可执行任务
+            break
 
         task = all_tasks[task_id]
         task_idx += 1
         started_tasks.add(task_id)
 
-        # 警告任务处理
         if status == 'warning':
             if not force_warnings:
                 print(f"\n{COLORS['yellow']}[警告]{COLORS['reset']} 任务 {task['name']} 需要更多显存")
@@ -662,9 +853,10 @@ def auto_run_executable(force_warnings=False):
             else:
                 print(f"\n{COLORS['yellow']}[强制执行]{COLORS['reset']} {task['name']} (显存可能不足)")
 
-        print(f"\n[{task_idx}/{total_tasks}] 执行: {task['name']}")
+        print(f"\n{'=' * 60}")
+        print(f"[{task_idx}/{total_tasks}] 执行: {task['name']}")
+        print(f"{'=' * 60}")
 
-        # 记录任务开始
         log_task_execution(task_id, 'started')
         task_start = datetime.now()
 
@@ -672,14 +864,30 @@ def auto_run_executable(force_warnings=False):
             success_count += 1
             duration = (datetime.now() - task_start).total_seconds()
             log_task_execution(task_id, 'completed', duration_seconds=duration)
+            last_done = task_id
         else:
             fail_count += 1
             duration = (datetime.now() - task_start).total_seconds()
             log_task_execution(task_id, 'failed', duration_seconds=duration)
+            last_done = None
             if not force_warnings:
                 retry = input("\n训练失败，是否继续下一个任务? (y/n): ").strip().lower()
                 if retry != 'y':
                     break
+            continue
+
+        # 任务完成后：刷新进度表
+        # 判断哪些任务被解锁了（之前 locked，现在 executable）
+        completed = get_completed_tasks()
+        newly_unlocked = []
+        for tid in all_tasks:
+            old_status = get_task_status(tid, completed - {task_id}, hardware_level)
+            new_status = get_task_status(tid, completed, hardware_level)
+            if old_status == 'locked' and new_status in ('executable', 'warning'):
+                newly_unlocked.append(tid)
+
+        _print_progress_table(title=f"任务完成，刷新进度", last_done=last_done, newly_unlocked=newly_unlocked)
+        last_done = None
 
     print(f"\n{'=' * 60}")
     print(f"自动执行完成: {COLORS['green']}{success_count} 成功{COLORS['reset']}, "

@@ -7,7 +7,6 @@
 ---
 
 ## [v4.6.6] - 2026-08-07
-
 ### 修复：train_model eval 循环收集完整 6 维用于 YOLO 变体
 
 **问题**：`swin_yolo` 等 eval 模式收集了 `global_density`（shape `(B,1)`）而非完整输出 `(B,6)`，
@@ -20,6 +19,29 @@
 - 动态拓扑重排：每次任务完成后重新扫描依赖，新解锁任务立即执行
 - 优先恢复：被中断的任务（epoch>0, is_complete=False）优先于新任务执行
 - 执行计划预览：启动时显示完整依赖树和每个任务的检查点状态
+
+### 优化：执行计划预览改为实时进度表
+
+- 静态预览改为**每次任务完成后刷新**的实时进度表
+- 显示每个任务的：状态图标、名称、当前 epoch/is_complete、依赖列表
+- 底部统计各状态任务数量
+- 刚完成的任务标记 `[刚完成]`，刚解锁的任务标记 `[刚解锁]`
+- 中文显示宽度对齐，列宽 63-67 字符紧凑表格式
+
+### 修复：检查点迁移稳定性
+
+- `rglob` 迭代中移动文件：`list()` 先快照避免生成器失效
+- 已迁移文件跳过：`resolve()` 比较源目标路径
+- Windows `copy2` 冲突：改用 `copy2` + `unlink()` 分开操作
+- `_get_task_checkpoint_info()` 兼容旧格式文件名（`*_detection_off0_*` 无 `_task` 前缀）
+- 旧检查点递归扫描 `checkpoints/` 所有子目录
+
+### 新增：检查点文件名含 epoch 数
+
+- 新格式：`{variant}_{task}_off{offset}_e{epoch:03d}_best.pt`（如 `resnet18_detection_off0_e002_best.pt`）
+- 旧格式 `{variant}_{task}_off{offset}_best.pt` 保持兼容（自动识别）
+- 加载时 glob 查找最新 epoch 文件，`train_model` 每个 epoch 保存到独立文件
+- team_train.py 进度表显示 `best:N/xxx last:N/xxx` 直观反映训练进度
 
 ---
 

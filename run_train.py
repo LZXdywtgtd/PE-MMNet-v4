@@ -14,10 +14,10 @@ PE-MMNet v4 统一训练脚本
   python run_train.py --mode train --task segmentation --epochs 100
 
   # 评估检查点（检测模式）
-  python run_train.py --mode eval --checkpoint ./checkpoints/resnet18/resnet18_detection_off0_best.pt
+  python run_train.py --mode eval --checkpoint ./checkpoints/resnet18/resnet18_detection_off0_e002_best.pt
 
   # 评估检查点（分割模式）
-  python run_train.py --mode eval --checkpoint ./checkpoints/resnet18/resnet18_segmentation_off0_best.pt
+  python run_train.py --mode eval --checkpoint ./checkpoints/resnet18/resnet18_segmentation_off0_e002_best.pt
 
   # 运行消融实验
   python run_train.py --mode ablation
@@ -1066,8 +1066,10 @@ def _backup_checkpoint_to_backup_dir(path: str, backup_dir) -> str:
     if not path or not os.path.exists(path):
         return ''
     import shutil
+    from pathlib import Path as _Path_t
+    backup_dir_p = _Path_t(backup_dir) if isinstance(backup_dir, str) else backup_dir
     filename = os.path.basename(path)
-    backup = backup_dir / f"{filename}.config_changed_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    backup = backup_dir_p / f"{filename}.config_changed_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     shutil.copy2(path, backup)
     return str(backup)
 
@@ -1076,30 +1078,55 @@ def migrate_old_checkpoints():
     """自动迁移旧格式检查点到新分层目录（按变体分子目录）"""
     import shutil
     from pathlib import Path as _Path
-    old_pattern = re.compile(
-        r'^(?P<variant>[a-zA-Z0-9_]+)_(?P<backbone_2d>[a-zA-Z0-9_]+)_(?P<backbone_1d>[a-zA-Z0-9_]+)_(?P<fusion>[a-zA-Z0-9_]+)_task(?P<task>[a-zA-Z_]+)_offset(?P<offset>\d+)_(?P<type>best|last)\.pt$'
-    )
+    # 从文件名末尾解析：prefix_task_offN_best.pt
+    # 例如: resnet18_resnet18_cnn_detection_off0_best.pt
+    known_tasks = ['detection', 'segmentation', 'multitask']
+    # 已知的带下划线的 variant（用于从前缀中提取正确的 variant 名）
+    known_variant_prefixes = ['swin_yolo_patchtst', 'swin_yolo', 'vit_yolo', 'resnet18', 'detr']
+
+    def _extract_variant_from_prefix(prefix: str) -> str:
+        """从文件名前缀提取 variant 名"""
+        for vp in sorted(known_variant_prefixes, key=len, reverse=True):  # 长优先匹配
+            if prefix.startswith(vp):
+                # 确认后面是下划线分隔的（避免 resnet18_resnet18_cnn 被匹配为 resnet18）
+                rest = prefix[len(vp):]
+                if not rest or rest.startswith('_'):
+                    return vp
+        return prefix.split('_')[0]
+
+    def parse_old_filename(filename):
+        """解析旧格式文件名，返回 (prefix, task, offset, type)"""
+        import re as _re
+        m = _re.match(
+            r'^(?P<prefix>.+?)_(?P<task>detection|segmentation|multitask)_off(?P<offset>\d+)_(?P<type>best|last)\.pt$',
+            filename
+        )
+        if not m:
+            return None
+        return m.group('prefix'), m.group('task'), m.group('offset'), m.group('type')
     new_pattern = re.compile(
         r'^(?P<variant>[a-zA-Z0-9_]+)_(?P<task>[a-zA-Z_]+)_off(?P<offset>\d+)_(?P<type>best|last)\.pt$'
     )
 
-    for file in _Path(CHECKPOINT_DIR).glob('*.pt'):
+    for file in list(_Path(CHECKPOINT_DIR).rglob('*.pt')):
         if 'backup' in file.parts:
             continue
-        match = old_pattern.match(file.name)
-        if match:
-            variant = match.group('variant')
-            task = match.group('task')
-            offset = match.group('offset')
-            ctype = match.group('type')
+        parsed = parse_old_filename(file.name)
+        if parsed:
+            prefix, task, offset, ctype = parsed
+            variant = _extract_variant_from_prefix(prefix)
             target_dir = _Path(CHECKPOINT_DIR) / variant
             target_dir.mkdir(exist_ok=True)
             new_name = f"{variant}_{task}_off{offset}_{ctype}.pt"
             target_path = target_dir / new_name
+            if file.resolve() == target_path.resolve():
+                continue  # 已在正确位置，跳过
             if target_path.exists():
                 backup = target_path.with_suffix(f'.conflict_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pt')
-                shutil.move(str(target_path), str(backup))
-            shutil.move(str(file), str(target_path))
+                shutil.copy2(str(target_path), str(backup))
+                target_path.unlink()
+            shutil.copy2(str(file), str(target_path))
+            file.unlink()
             print_info(f"已迁移旧检查点: {file.name} → {variant}/{new_name}")
         else:
             match_new = new_pattern.match(file.name)
@@ -1108,10 +1135,14 @@ def migrate_old_checkpoints():
                 target_dir = _Path(CHECKPOINT_DIR) / variant
                 target_dir.mkdir(exist_ok=True)
                 target_path = target_dir / file.name
+                if file.resolve() == target_path.resolve():
+                    continue  # 已在正确位置，跳过
                 if target_path.exists():
                     backup = target_path.with_suffix(f'.conflict_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pt')
-                    shutil.move(str(target_path), str(backup))
-                shutil.move(str(file), str(target_path))
+                    shutil.copy2(str(target_path), str(backup))
+                    target_path.unlink()
+                shutil.copy2(str(file), str(target_path))
+                file.unlink()
                 print_info(f"已自动归类: {file.name} → {variant}/")
 
 
@@ -1616,24 +1647,31 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             metrics_line2 = ""
 
 
-        # 保存最佳模型
+        # 保存最佳模型（路径含 epoch 数）
         if val_loss < best_loss - config['min_delta']:
             best_loss = val_loss
             best_epoch = epoch + 1  # 记录最佳Epoch
             patience_counter = 0
             if checkpoint_path:
+                # 动态构造含 epoch 的路径：{prefix}_e{epoch:03d}_best.pt
+                import re
+                base = re.sub(r'_e\d+_', '_', checkpoint_path.rsplit('_best.pt', 1)[0])
+                best_save_path = f"{base}_e{best_epoch:03d}_best.pt"
                 torch.save(
                     _build_checkpoint_data(model, config, epoch, best_loss, 'improvement'),
-                    checkpoint_path
+                    best_save_path
                 )
         else:
             patience_counter += 1
 
-        # 每个 epoch 结束无条件保存兜底检查点（用于崩溃恢复）
+        # 每个 epoch 结束无条件保存兜底检查点（路径含 epoch 数）
         if last_checkpoint_path:
+            import re
+            base = re.sub(r'_e\d+_', '_', last_checkpoint_path.rsplit('_last.pt', 1)[0])
+            last_save_path = f"{base}_e{epoch + 1:03d}_last.pt"
             torch.save(
                 _build_checkpoint_data(model, config, epoch, best_loss, 'epoch_end'),
-                last_checkpoint_path
+                last_save_path
             )
 
         # 获取当前学习率
@@ -1857,8 +1895,36 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
             start_epoch = 0
             best_metric = float('inf')
 
+    # 辅助：从带 epoch 的文件名列表中找最新 epoch
+    def _find_latest_epoch_file(base_path: str, ctype: str):
+        """查找最新 epoch 的检查点文件
+
+        支持新旧两种格式：
+        - 新格式: {base}_e{epoch:03d}_{ctype}.pt
+        - 旧格式: {base}_{ctype}.pt
+        """
+        import re, glob as _glob
+        pattern = f"{base_path}_e*_{ctype}.pt"
+        matched = _glob.glob(pattern)
+        if matched:
+            epoch_nums = []
+            for f in matched:
+                m = re.search(r'_e(\d+)_', f)
+                if m:
+                    epoch_nums.append((int(m.group(1)), f))
+            if epoch_nums:
+                return max(epoch_nums)[1]
+        # 回退旧格式
+        old = f"{base_path}_{ctype}.pt"
+        return old if os.path.exists(old) else None
+
+    # 构造不含 epoch 的基础路径（用于 glob 查找最新文件）
+    base_path = os.path.join(ckpt_subdir, f"{variant_key}_{task}_off{predict_offset}")
+    save_path = _find_latest_epoch_file(base_path, 'best')
+    last_save_path = _find_latest_epoch_file(base_path, 'last')
+
     # Case 4: 检查点存在 → 智能加载（签名校验 + Epoch 变更处理）
-    elif os.path.exists(save_path):
+    if save_path and os.path.exists(save_path):
         checkpoint = torch.load(save_path, map_location=device, weights_only=False)
         is_complete = checkpoint.get('is_complete', False)
         saved_epoch = checkpoint.get('epoch', 0)   # 1-indexed
