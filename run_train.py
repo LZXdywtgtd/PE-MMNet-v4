@@ -1504,9 +1504,9 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                             # 所有网格都标记为正样本（推理模式简化处理）
                             pos_mask = torch.ones(B_v, actual_num_grids, dtype=torch.bool, device=model_output.device)
                             loss_total = criterion(grid_pred, assigned_target, global_density, labels[:, 5:6], pos_mask)
-                        # 收集预测用于指标计算（取global_density）
-                        all_preds.append(global_density.cpu())
-                        all_targets.append(labels[:, 5:6].cpu())
+                        # 收集完整 6 维输出用于指标计算
+                        all_preds.append(model_output.cpu())
+                        all_targets.append(labels[:, :6].cpu())
                     else:  # detr
                         # DETR eval 模式：model_output 是 (B, 6) 最佳预测
                         # 临时切换到训练模式以获取全部 100 个 query 预测来计算有意义的验证损失
