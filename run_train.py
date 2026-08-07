@@ -14,10 +14,10 @@ PE-MMNet v4 统一训练脚本
   python run_train.py --mode train --task segmentation --epochs 100
 
   # 评估检查点（检测模式）
-  python run_train.py --mode eval --checkpoint ./checkpoints/resnet18_cnn_attn_cross_attn_taskdetection_offset0_best.pt
+  python run_train.py --mode eval --checkpoint ./checkpoints/resnet18/resnet18_detection_off0_best.pt
 
   # 评估检查点（分割模式）
-  python run_train.py --mode eval --checkpoint ./checkpoints/resnet18_cnn_attn_cross_attn_tasksegmentation_offset0_best.pt
+  python run_train.py --mode eval --checkpoint ./checkpoints/resnet18/resnet18_segmentation_off0_best.pt
 
   # 运行消融实验
   python run_train.py --mode ablation
@@ -976,7 +976,7 @@ def _build_checkpoint_data(model, config, epoch, best_loss, save_reason):
         'model_state_dict': model.state_dict(),
         'task': config.get('task', 'detection'),
         'config': config,
-        'epoch': epoch,
+        'epoch': epoch + 1,   # 1-indexed：代表已完成的 epoch 数
         'best_loss': best_loss,
         'timestamp': datetime.now().isoformat(),
         'is_complete': False,
@@ -1034,6 +1034,85 @@ def _select_best_query_detr(detr_pred, labels, device):
         best_queries.append(detr_pred[b, row_ind[0]])  # (6,) — 取 cost 最低的
 
     return torch.stack(best_queries).to(device)  # (B, 6)
+
+
+# =============================================================================
+# 配置签名校验 + 检查点迁移
+# =============================================================================
+
+SIGNATURE_KEYS = [
+    'variant', 'backbone_2d', 'backbone_1d', 'fusion', 'task',
+    'predict_offset', 'image_size', 'fp16', 'triple_channel',
+    'use_coord_attn', 'feature_len', 'seq_interp_mode',
+    'remove_contours', 'staged_train',
+]
+
+
+def _compute_config_signature(config: dict) -> dict:
+    """提取关键配置字段生成签名"""
+    return {k: config.get(k) for k in SIGNATURE_KEYS}
+
+
+def _check_signature_mismatch(saved_config: dict, current_config: dict) -> list:
+    """比对两个配置的签名，返回不匹配的字段列表"""
+    saved_sig = _compute_config_signature(saved_config)
+    current_sig = _compute_config_signature(current_config)
+    return [k for k in SIGNATURE_KEYS
+            if saved_sig.get(k) != current_sig.get(k)]
+
+
+def _backup_checkpoint_to_backup_dir(path: str, backup_dir) -> str:
+    """备份检查点到 backup/ 子目录（防覆盖冲突）"""
+    if not path or not os.path.exists(path):
+        return ''
+    import shutil
+    filename = os.path.basename(path)
+    backup = backup_dir / f"{filename}.config_changed_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    shutil.copy2(path, backup)
+    return str(backup)
+
+
+def migrate_old_checkpoints():
+    """自动迁移旧格式检查点到新分层目录（按变体分子目录）"""
+    import shutil
+    from pathlib import Path as _Path
+    old_pattern = re.compile(
+        r'^(?P<variant>[a-zA-Z0-9_]+)_(?P<backbone_2d>[a-zA-Z0-9_]+)_(?P<backbone_1d>[a-zA-Z0-9_]+)_(?P<fusion>[a-zA-Z0-9_]+)_task(?P<task>[a-zA-Z_]+)_offset(?P<offset>\d+)_(?P<type>best|last)\.pt$'
+    )
+    new_pattern = re.compile(
+        r'^(?P<variant>[a-zA-Z0-9_]+)_(?P<task>[a-zA-Z_]+)_off(?P<offset>\d+)_(?P<type>best|last)\.pt$'
+    )
+
+    for file in _Path(CHECKPOINT_DIR).glob('*.pt'):
+        if 'backup' in file.parts:
+            continue
+        match = old_pattern.match(file.name)
+        if match:
+            variant = match.group('variant')
+            task = match.group('task')
+            offset = match.group('offset')
+            ctype = match.group('type')
+            target_dir = _Path(CHECKPOINT_DIR) / variant
+            target_dir.mkdir(exist_ok=True)
+            new_name = f"{variant}_{task}_off{offset}_{ctype}.pt"
+            target_path = target_dir / new_name
+            if target_path.exists():
+                backup = target_path.with_suffix(f'.conflict_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pt')
+                shutil.move(str(target_path), str(backup))
+            shutil.move(str(file), str(target_path))
+            print_info(f"已迁移旧检查点: {file.name} → {variant}/{new_name}")
+        else:
+            match_new = new_pattern.match(file.name)
+            if match_new:
+                variant = match_new.group('variant')
+                target_dir = _Path(CHECKPOINT_DIR) / variant
+                target_dir.mkdir(exist_ok=True)
+                target_path = target_dir / file.name
+                if target_path.exists():
+                    backup = target_path.with_suffix(f'.conflict_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pt')
+                    shutil.move(str(target_path), str(backup))
+                shutil.move(str(file), str(target_path))
+                print_info(f"已自动归类: {file.name} → {variant}/")
 
 
 def train_model(model, train_loader, test_loader, config, device, checkpoint_path=None, task_id=None):
@@ -1689,13 +1768,21 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
     if task_id:
         config['task_id'] = task_id
 
-    # 修复：检查点文件名包含 variant_key，避免不同变体互相覆盖
-    # 格式：{variant}_{backbone_2d}_{backbone_1d}_{fusion}_task{task}_offset{offset}_best.pt
+    # 分层目录：checkpoints/{variant}/
+    # 格式：{variant}_{task}_off{offset}_{best|last}.pt
+    ckpt_subdir = os.path.join(CHECKPOINT_DIR, variant_key)
+    backup_subdir = os.path.join(CHECKPOINT_DIR, 'backup')
+    os.makedirs(ckpt_subdir, exist_ok=True)
+    os.makedirs(backup_subdir, exist_ok=True)
+
     save_path = os.path.join(
-        CHECKPOINT_DIR,
-        f"{variant_key}_{backbone_2d}_{backbone_1d}_{fusion}_task{task}_offset{predict_offset}_best.pt"
+        ckpt_subdir,
+        f"{variant_key}_{task}_off{predict_offset}_best.pt"
     )
-    last_save_path = save_path[:-8] + '_last.pt' if save_path.endswith('_best.pt') else None
+    last_save_path = os.path.join(
+        ckpt_subdir,
+        f"{variant_key}_{task}_off{predict_offset}_last.pt"
+    )
 
     # ========== 模型实例化（根据变体类型）==========
 
@@ -1757,7 +1844,7 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
             checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 model.load_state_dict(checkpoint['model_state_dict'])
-                start_epoch = checkpoint.get('epoch', 0) + 1
+                start_epoch = checkpoint.get('epoch', 0)  # 1-indexed
                 best_metric = checkpoint.get('best_metric', float('inf'))
             else:
                 model.load_state_dict(checkpoint)
@@ -1770,38 +1857,73 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
             start_epoch = 0
             best_metric = float('inf')
 
-    # Case 4: predict_offset == 0 且检查点存在 → 智能加载
+    # Case 4: 检查点存在 → 智能加载（签名校验 + Epoch 变更处理）
     elif os.path.exists(save_path):
         checkpoint = torch.load(save_path, map_location=device, weights_only=False)
         is_complete = checkpoint.get('is_complete', False)
+        saved_epoch = checkpoint.get('epoch', 0)   # 1-indexed
+        new_target_epochs = config['epochs']
 
-        if is_complete:
-            # 训练已完成，直接返回（不重复训练）
-            print_info(f"[OK] 检查点已存在且训练完成: {save_path}")
-            print_info(f"   原因: {checkpoint.get('save_reason', 'unknown')}")
-            print_info(f"   轮次: Epoch {checkpoint.get('epoch', '?')+1}, "
-                       f"最佳损失: {checkpoint.get('best_loss', '?')}")
-            print_info(f"   如需重新训练，请删除检查点文件或使用 --force_retrain")
+        # 配置签名校验
+        saved_config = checkpoint.get('config', {})
+        mismatches = _check_signature_mismatch(saved_config, config)
+
+        if mismatches:
+            # 配置不匹配：备份 + 强制重训
+            print_warning(f"[WARN] 配置已变更，跳过旧检查点")
+            print_warning(f"   变更字段: {', '.join(mismatches)}")
+            _backup_checkpoint_to_backup_dir(save_path, backup_subdir)
+            _backup_checkpoint_to_backup_dir(last_save_path, backup_subdir)
+            model = create_variant_model()
+            start_epoch = 0
+            best_metric = float('inf')
+
+        elif is_complete and new_target_epochs > saved_epoch:
+            # 已完成但目标 epoch 增多：继续训练
+            print_info(f"[INFO] 目标 Epoch ({new_target_epochs}) > 已训练 ({saved_epoch})")
+            print_info(f"   策略：从 Epoch {saved_epoch} 继续训练（忽略 is_complete=True）")
+            model = create_variant_model()
+            model.load_state_dict(checkpoint['model_state_dict'])
+            start_epoch = saved_epoch        # 直接等于 saved_epoch（1-indexed）
+            best_metric = checkpoint.get('best_loss', float('inf'))
+
+        elif is_complete:
+            # 已完成且目标已达到：直接返回
+            print_info(f"[OK] 训练已完成 (Epoch {saved_epoch}/{new_target_epochs}): {save_path}")
             model = create_variant_model()
             model.load_state_dict(checkpoint['model_state_dict'])
             model.eval()
             return model
+
         else:
-            # 意外中断，继续训练
-            print_info(f"[OK] 检测到意外中断的检查点: {save_path}")
-            print_info(f"   Epoch {checkpoint.get('epoch', '?')+1}, 损失: {checkpoint.get('best_loss', '?')}")
-            print_info(f"   继续训练...")
+            # 意外中断：从断点恢复
+            print_info(f"[OK] 检测到意外中断的检查点: {save_path} (Epoch {saved_epoch})")
             model = create_variant_model()
             model.load_state_dict(checkpoint['model_state_dict'])
+            start_epoch = saved_epoch
+            best_metric = checkpoint.get('best_loss', float('inf'))
 
-    # Case 4b: 无 best.pt 但有 _last.pt → 从崩溃恢复
+    # Case 4b: 无 best.pt 但有 last.pt → 从崩溃恢复
     elif os.path.exists(last_save_path):
-        print_info(f"[OK] 从意外中断恢复: {last_save_path}")
         checkpoint = torch.load(last_save_path, map_location=device, weights_only=False)
-        model = create_variant_model()
-        model.load_state_dict(checkpoint['model_state_dict'])
+        saved_config = checkpoint.get('config', {})
+        mismatches = _check_signature_mismatch(saved_config, config)
 
-    # Case 3: 无检查点 → 从头训练
+        if mismatches:
+            print_warning(f"[WARN] last.pt 配置不匹配，强制重训")
+            _backup_checkpoint_to_backup_dir(last_save_path, backup_subdir)
+            model = create_variant_model()
+            start_epoch = 0
+            best_metric = float('inf')
+        else:
+            saved_epoch = checkpoint.get('epoch', 0)
+            print_info(f"[OK] 从崩溃恢复: {last_save_path} (Epoch {saved_epoch})")
+            model = create_variant_model()
+            model.load_state_dict(checkpoint['model_state_dict'])
+            start_epoch = saved_epoch
+            best_metric = checkpoint.get('best_loss', float('inf'))
+
+    # Case 5: 无检查点 → 从头训练
     else:
         print_info(f"[NEW] 未找到检查点，从头训练")
         model = create_variant_model()
@@ -1862,6 +1984,9 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
 # =============================================================================
 
 def main():
+    # 自动迁移旧格式检查点到新分层目录
+    migrate_old_checkpoints()
+
     parser = argparse.ArgumentParser(description='PE-MMNet v4 统一训练脚本')
 
     # 模式

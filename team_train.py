@@ -298,15 +298,20 @@ def get_hardware_level():
 
 
 def get_completed_tasks():
-    """扫描 checkpoints/ 目录，识别已完成的任务
+    """扫描 checkpoints/ 目录（含子目录），识别已完成的任务
 
-    优先从检查点元数据中读取 task_id，兼容文件名解析作为备用
+    支持新分层目录结构（checkpoints/{variant}/best.pt）和旧格式。
+    优先从检查点元数据中读取 task_id，兼容文件名解析作为备用。
+    跳过 backup/ 目录。
     """
     completed = set()
     if not CHECKPOINT_DIR.exists():
         return completed
 
-    for ckpt_file in CHECKPOINT_DIR.glob('*_best.pt'):
+    for ckpt_file in CHECKPOINT_DIR.rglob('*_best.pt'):
+        # 跳过 backup 目录
+        if 'backup' in ckpt_file.parts:
+            continue
         task_id = None
 
         # 方法1: 从元数据读取 task_id（优先）
@@ -331,10 +336,10 @@ def parse_task_id_from_filename(filename, all_tasks):
     """从文件名中解析 task_id（增强版）
 
     支持格式：
-    - checkpoint_BASELINE_1_best.pt  → BASELINE_1
-    - BASELINE_1_model_best.pt        → BASELINE_1
-    - model_BASELINE_1_best.pt        → BASELINE_1
-    - resnet18_BASELINE_1_best.pt     → BASELINE_1
+    - checkpoint_A1_best.pt           → A1
+    - resnet18_A1_best.pt             → A1
+    - resnet18_detection_off0_best.pt → 尝试匹配 A1 等任务ID
+    - A1_best.pt                      → A1
 
     Args:
         filename: 检查点文件名
@@ -400,6 +405,9 @@ def load_tasks_from_files():
         return tasks
 
     for json_file in TASKS_DIR.glob('*.json'):
+        # 跳过模板参考文件
+        if json_file.name in ('examples.json', 'example.json', 'template.json'):
+            continue
         try:
             with open(json_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
