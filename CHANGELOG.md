@@ -6,6 +6,23 @@
 
 ---
 
+## [v4.6.6] - 2026-08-07
+
+### 修复：train_model eval 循环收集完整 6 维用于 YOLO 变体
+
+**问题**：`swin_yolo` 等 eval 模式收集了 `global_density`（shape `(B,1)`）而非完整输出 `(B,6)`，
+导致 `preds[:, 5]` 索引时报 `IndexError: index 5 is out of bounds for axis 1 with size 1`。
+
+**修复**：统一收集完整 6 维输出和标签。
+
+### 修复：team_train.py 动态拓扑 + 执行计划预览
+
+- 动态拓扑重排：每次任务完成后重新扫描依赖，新解锁任务立即执行
+- 优先恢复：被中断的任务（epoch>0, is_complete=False）优先于新任务执行
+- 执行计划预览：启动时显示完整依赖树和每个任务的检查点状态
+
+---
+
 ## [v4.6.5] - 2026-08-07
 
 ### 新增：检查点系统全面重构

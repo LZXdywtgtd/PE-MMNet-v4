@@ -483,36 +483,171 @@ def run_training_task(task_id: str) -> bool:
         return False
 
 
-def auto_run_executable(force_warnings=False):
-    """自动执行所有可执行任务
+def _get_task_checkpoint_info(task_id: str) -> dict:
+    """获取任务的检查点信息（epoch、is_complete）"""
+    task = all_tasks.get(task_id, {})
+    args_str = task.get('args', '')
+    variant = _extract_arg(args_str, '--variant') or 'resnet18'
+    task_mode = _extract_arg(args_str, '--task') or 'detection'
+    offset = _extract_arg(args_str, '--predict_offset') or '0'
+    subdir = CHECKPOINT_DIR / variant
+    ckpt_path = subdir / f"{variant}_{task_mode}_off{offset}_best.pt"
+    last_path = subdir / f"{variant}_{task_mode}_off{offset}_last.pt"
 
-    Args:
-        force_warnings: 是否强制执行警告任务（硬件可能不足）
-    """
+    for path in [ckpt_path, last_path]:
+        if path.exists():
+            try:
+                ckpt = torch.load(path, map_location='cpu', weights_only=False)
+                return {
+                    'epoch': ckpt.get('epoch', 0),
+                    'is_complete': ckpt.get('is_complete', False),
+                    'path': path.name
+                }
+            except Exception:
+                pass
+    return {'epoch': 0, 'is_complete': False, 'path': None}
+
+
+def _extract_arg(args_str: str, arg: str) -> str:
+    """从 args 字符串中提取指定参数的值"""
+    import re
+    pattern = re.compile(re.escape(arg) + r'\s+(\S+)')
+    match = pattern.search(args_str)
+    return match.group(1) if match else None
+
+
+def _print_execution_plan():
+    """打印执行计划（依赖树 + 检查点状态）"""
     completed = get_completed_tasks()
     hardware_level, _ = get_hardware_level()
 
-    # 获取可执行任务列表（按拓扑排序）
-    executable = []
+    print(f"\n{'=' * 60}")
+    print(f"  执行计划预览")
+    print(f"{'=' * 60}")
+
+    # 按依赖深度分层显示
+    def get_depth(task_id, visited=None):
+        if visited is None:
+            visited = set()
+        if task_id in visited:
+            return 0
+        visited.add(task_id)
+        task = all_tasks.get(task_id, {})
+        deps = task.get('deps', [])
+        if not deps:
+            return 0
+        return 1 + max((get_depth(d, visited) for d in deps), default=0)
+
+    # 收集所有任务的深度和状态
+    task_info = {}
     for task_id in all_tasks:
         status = get_task_status(task_id, completed, hardware_level)
-        if status in ('executable', 'warning'):
-            executable.append((task_id, status))
+        ckpt_info = _get_task_checkpoint_info(task_id)
+        depth = get_depth(task_id)
+        task_info[task_id] = {
+            'status': status,
+            'depth': depth,
+            'epoch': ckpt_info['epoch'],
+            'is_complete': ckpt_info['is_complete'],
+        }
 
-    if not executable:
-        print(f"\n{COLORS['yellow']}[信息]{COLORS['reset']} 没有可执行的任务")
+    # 打印每个深度的任务
+    for depth in range(max(t['depth'] for t in task_info.values()) + 1):
+        tasks_at_depth = [(tid, info) for tid, info in task_info.items() if info['depth'] == depth]
+        tasks_at_depth.sort(key=lambda x: x[0])
+        indent = "  " * depth
+        for task_id, info in tasks_at_depth:
+            task = all_tasks[task_id]
+            deps_str = f" ← {', '.join(task.get('deps', []))}" if task.get('deps') else ""
+
+            # 状态图标
+            if info['is_complete']:
+                icon = f"{COLORS['green']}✓已完成{COLORS['reset']}"
+            elif info['status'] == 'locked':
+                icon = f"{COLORS['gray']}🔒锁定{COLORS['reset']}"
+            elif info['status'] == 'warning':
+                icon = f"{COLORS['yellow']}!显存警告{COLORS['reset']}"
+            elif info['status'] == 'executable':
+                icon = f"{COLORS['cyan']}▶待执行{COLORS['reset']}"
+            else:
+                icon = f"{COLORS['gray']}?未知{COLORS['reset']}"
+
+            # 检查点信息
+            if info['is_complete']:
+                ckpt_str = f"Epoch {info['epoch']}/{task.get('args', '')}"
+            elif info['epoch'] > 0:
+                ckpt_str = f"{COLORS['yellow']}中断于 Epoch {info['epoch']}{COLORS['reset']}"
+            else:
+                ckpt_str = "新任务"
+
+            print(f"{indent}├── [{task_id}] {task['name']} {icon}")
+            print(f"{indent}│   {ckpt_str}{deps_str}")
+
+    print(f"{'=' * 60}\n")
+
+
+def auto_run_executable(force_warnings=False):
+    """自动执行所有可执行任务（动态拓扑重排）
+
+    每次任务完成后重新扫描依赖状态，新解锁的任务会立即加入执行队列。
+    优先恢复被中断的任务（is_complete=False）。"""
+
+    hardware_level, _ = get_hardware_level()
+    total_tasks = len(all_tasks)
+
+    # 启动前打印执行计划
+    _print_execution_plan()
+
+    # 动态扫描：每次执行后重新获取已完成状态
+    def get_next_task():
+        """获取下一个可执行且未被执行过的任务（优先恢复被中断的）"""
+        completed = get_completed_tasks()
+        interrupted = []  # 被中断的任务（优先）
+        executable = []  # 正常可执行
+
+        for task_id in all_tasks:
+            status = get_task_status(task_id, completed, hardware_level)
+            if status not in ('executable', 'warning'):
+                continue
+            ckpt_info = _get_task_checkpoint_info(task_id)
+            if ckpt_info['epoch'] > 0 and not ckpt_info['is_complete']:
+                interrupted.append(task_id)  # 被中断，优先恢复
+            else:
+                executable.append(task_id)
+
+        # 优先返回被中断的任务，其次按任务ID排序
+        if interrupted:
+            return sorted(interrupted)[0], 'executable'
+        if executable:
+            return sorted(executable)[0], 'executable'
+        return None, None
+
+    # 统计
+    success_count = 0
+    fail_count = 0
+    skip_count = 0
+    started_tasks = set()  # 记录已启动过的任务（避免重复）
+
+    # 首次扫描：检查是否有任何可执行任务
+    first_task, _ = get_next_task()
+    if first_task is None:
+        completed = get_completed_tasks()
+        print(f"\n{COLORS['yellow']}[信息]{COLORS['reset']} 没有可执行的任务 (已完成: {len(completed)}/{total_tasks})")
         return
 
     mode_str = "强制" if force_warnings else "标准"
     print(f"\n{COLORS['bold']}自动执行模式 ({mode_str}){COLORS['reset']}")
-    print(f"找到 {len(executable)} 个可执行任务\n")
+    print(f"总任务: {total_tasks} | 实时检测依赖满足情况\n")
 
-    success_count = 0
-    fail_count = 0
-    skip_count = 0
+    task_idx = 0
+    while True:
+        task_id, status = get_next_task()
+        if task_id is None:
+            break  # 无更多可执行任务
 
-    for i, (task_id, status) in enumerate(executable, 1):
         task = all_tasks[task_id]
+        task_idx += 1
+        started_tasks.add(task_id)
 
         # 警告任务处理
         if status == 'warning':
@@ -527,7 +662,7 @@ def auto_run_executable(force_warnings=False):
             else:
                 print(f"\n{COLORS['yellow']}[强制执行]{COLORS['reset']} {task['name']} (显存可能不足)")
 
-        print(f"\n[{i}/{len(executable)}] 执行: {task['name']}")
+        print(f"\n[{task_idx}/{total_tasks}] 执行: {task['name']}")
 
         # 记录任务开始
         log_task_execution(task_id, 'started')
