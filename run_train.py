@@ -1066,16 +1066,14 @@ def _build_checkpoint_data(model, config, epoch, best_loss, save_reason):
     return data
 
 
-def _mark_checkpoint_complete(best_path, last_path, async_save_fn=None, task_id=None):
+def _mark_checkpoint_complete(best_path, last_path, task_id=None):
     """将检查点标记为已完成（正常结束）
 
     同时支持 is_complete 和 is_retrain_done 两种完成标记。
-    保留 is_retrain_done 标志（配置变化后重新训练的场景）。
 
     Args:
         best_path: 最佳检查点路径
         last_path: 兜底检查点路径
-        async_save_fn: 可选的异步保存函数（接受 data, path）
         task_id: 任务ID（用于补全缺失的元数据）
     """
     for path in [best_path, last_path]:
@@ -1333,21 +1331,9 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
     if checkpoint_path and checkpoint_path.endswith('_best.pt'):
         last_checkpoint_path = checkpoint_path[:-8] + '_last.pt'
 
-    # 异步保存线程：减少训练主循环的 I/O 阻塞
-    from concurrent.futures import ThreadPoolExecutor
-    _save_executor = ThreadPoolExecutor(max_workers=1)
-    _save_queue = []
-
     # 跟踪最后一个 epoch 的实际保存路径（供 _mark_checkpoint_complete 使用）
     _latest_best_path = None
     _latest_last_path = None
-
-    def _async_save(data, path):
-        """提交异步保存（不阻塞主线程）"""
-        def _do_save():
-            torch.save(data, path)
-        future = _save_executor.submit(_do_save)
-        _save_queue.append(future)
 
     # 根据任务类型选择损失函数
     task = config.get('task', 'detection')
@@ -1828,11 +1814,13 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             patience_counter = 0
             if checkpoint_path:
                 # 动态构造含 epoch 的路径：{prefix}_e{epoch:03d}_best.pt
+                # 先去掉 _best.pt，再剥离末尾的 _e{epoch}（兼容已含 epoch 的旧检查点路径）
                 import re
-                base = re.sub(r'_e\d+_', '_', checkpoint_path.rsplit('_best.pt', 1)[0])
+                no_suffix = checkpoint_path.rsplit('_best.pt', 1)[0]
+                base = re.sub(r'_e\d+$', '', no_suffix)
                 best_save_path = f"{base}_e{best_epoch:03d}_best.pt"
                 _latest_best_path = best_save_path
-                _async_save(
+                torch.save(
                     _build_checkpoint_data(model, config, epoch, best_loss, 'improvement'),
                     best_save_path
                 )
@@ -1840,13 +1828,14 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
         else:
             patience_counter += 1
 
-        # 每个 epoch 结束无条件保存兜底检查点（路径含 epoch 数，异步不阻塞）
+        # 每个 epoch 结束无条件保存兜底检查点（路径含 epoch 数）
         if last_checkpoint_path:
             import re
-            base = re.sub(r'_e\d+_', '_', last_checkpoint_path.rsplit('_last.pt', 1)[0])
+            no_suffix = last_checkpoint_path.rsplit('_last.pt', 1)[0]
+            base = re.sub(r'_e\d+$', '', no_suffix)
             last_save_path = f"{base}_e{epoch + 1:03d}_last.pt"
             _latest_last_path = last_save_path
-            _async_save(
+            torch.save(
                 _build_checkpoint_data(model, config, epoch, best_loss, 'epoch_end'),
                 last_save_path
             )
@@ -1948,15 +1937,13 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
 
         if patience_counter >= config['patience']:
             print_warning(f"早停: 连续 {config['patience']} 个epoch未改善")
-            _mark_checkpoint_complete(_latest_best_path, _latest_last_path, _async_save)
+            _mark_checkpoint_complete(_latest_best_path, _latest_last_path)
             break
 
     total_time = time.time() - start_time
     print_info(f"训练完成! 总时间: {total_time:.1f}s ({total_time/60:.1f}min)")
     # 标记检查点为已完成（正常结束）
-    _mark_checkpoint_complete(_latest_best_path, _latest_last_path, _async_save)
-    # 等待所有异步保存完成后再返回
-    _save_executor.shutdown(wait=True)
+    _mark_checkpoint_complete(_latest_best_path, _latest_last_path)
     return model, {'val_loss': best_loss}
 
 
