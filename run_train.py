@@ -86,25 +86,22 @@ print = functools.partial(print, flush=True)
 # Tee 类：同时输出到控制台和日志文件
 # =============================================================================
 
-import atexit
-
-
 class Tee:
     """同时输出到控制台和日志文件，颜色码自动去除后写入文件"""
 
     def __init__(self, filename: str):
         self.file = open(filename, 'w', encoding='utf-8')
-        self.stdout = sys.stdout
+        self._orig = sys.stdout  # 保存原始 stdout 引用
         self._ansi = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
 
     def write(self, text: str):
-        self.stdout.write(text)
+        self._orig.write(text)
         plain = self._ansi.sub('', text)
         self.file.write(plain)
         self.file.flush()
 
     def flush(self):
-        self.stdout.flush()
+        self._orig.flush()
         self.file.flush()
 
     def close(self):
@@ -2362,7 +2359,6 @@ def main():
         tee_err = Tee(log_path)
         sys.stdout = tee_out
         sys.stderr = tee_err
-        atexit.register(lambda: (tee_out.close(), tee_err.close()))
     # =============================================
 
     # 跟踪用户显式指定的参数（用于 auto_select_config 决策）
