@@ -1001,7 +1001,10 @@ def estimate_training_time(model, train_loader, test_loader, criterion, optimize
 
 
 def _build_checkpoint_data(model, config, epoch, best_loss, save_reason):
-    """构建检查点数据字典"""
+    """构建检查点数据字典
+
+    is_retrain_done: 配置签名变化后重新训练完成，team_train 视为正常完成（不再重跑）
+    """
     data = {
         'model_state_dict': model.state_dict(),
         'task': config.get('task', 'detection'),
@@ -1010,6 +1013,7 @@ def _build_checkpoint_data(model, config, epoch, best_loss, save_reason):
         'best_loss': best_loss,
         'timestamp': datetime.now().isoformat(),
         'is_complete': False,
+        'is_retrain_done': config.get('_is_retrain', False),
         'save_reason': save_reason,
     }
     if config.get('task_id'):
@@ -1017,8 +1021,18 @@ def _build_checkpoint_data(model, config, epoch, best_loss, save_reason):
     return data
 
 
-def _mark_checkpoint_complete(best_path, last_path):
-    """将检查点标记为已完成，用于区分意外中断和正常结束"""
+def _mark_checkpoint_complete(best_path, last_path, async_save_fn=None, task_id=None):
+    """将检查点标记为已完成（正常结束）
+
+    同时支持 is_complete 和 is_retrain_done 两种完成标记。
+    保留 is_retrain_done 标志（配置变化后重新训练的场景）。
+
+    Args:
+        best_path: 最佳检查点路径
+        last_path: 兜底检查点路径
+        async_save_fn: 可选的异步保存函数（接受 data, path）
+        task_id: 任务ID（用于补全缺失的元数据）
+    """
     for path in [best_path, last_path]:
         if not path:
             continue
@@ -1029,7 +1043,13 @@ def _mark_checkpoint_complete(best_path, last_path):
         ckpt['is_complete'] = True
         reason = ckpt.get('save_reason', 'epoch_end')
         ckpt['save_reason'] = 'early_stop' if reason == 'improvement' else 'completed'
-        torch.save(ckpt, path)
+        # 补全缺失的 task_id（迁移后的旧检查点可能没有）
+        if task_id and not ckpt.get('task_id'):
+            ckpt['task_id'] = task_id
+        if async_save_fn:
+            async_save_fn(ckpt, path)
+        else:
+            torch.save(ckpt, path)
 
 
 def _select_best_query_detr(detr_pred, labels, device):
@@ -1072,23 +1092,42 @@ def _select_best_query_detr(detr_pred, labels, device):
 
 SIGNATURE_KEYS = [
     'variant', 'backbone_2d', 'backbone_1d', 'fusion', 'task',
-    'predict_offset', 'image_size', 'fp16', 'triple_channel',
-    'use_coord_attn', 'feature_len', 'seq_interp_mode',
-    'remove_contours', 'staged_train',
+    'predict_offset', 'triple_channel', 'use_coord_attn',
+    'feature_len', 'seq_interp_mode', 'remove_contours', 'staged_train',
 ]
+
+# DETR 位置编码形状直接依赖 image_size，必须纳入签名
+_DETR_SIGNATURE_KEYS = SIGNATURE_KEYS + ['image_size']
 
 
 def _compute_config_signature(config: dict) -> dict:
-    """提取关键配置字段生成签名"""
-    return {k: config.get(k) for k in SIGNATURE_KEYS}
+    """提取关键配置字段生成签名
+
+    DETR 变体额外包含 image_size（位置编码形状依赖它）。
+    """
+    keys = _DETR_SIGNATURE_KEYS if config.get('variant') == 'detr' else SIGNATURE_KEYS
+    return {k: config.get(k) for k in keys}
 
 
 def _check_signature_mismatch(saved_config: dict, current_config: dict) -> list:
-    """比对两个配置的签名，返回不匹配的字段列表"""
+    """比对两个配置的签名，返回不匹配的字段列表
+
+    None 和 False 视为等价（命令行布尔标志未指定时的默认值差异）。
+    DETR 变体额外比对 image_size（位置编码形状依赖它）。
+    """
     saved_sig = _compute_config_signature(saved_config)
     current_sig = _compute_config_signature(current_config)
-    return [k for k in SIGNATURE_KEYS
-            if saved_sig.get(k) != current_sig.get(k)]
+    keys = _DETR_SIGNATURE_KEYS if current_config.get('variant') == 'detr' else SIGNATURE_KEYS
+    mismatches = []
+    for k in keys:
+        sv = saved_sig.get(k)
+        cv = current_sig.get(k)
+        # None 和 False 等价（命令行未指定参数的默认值差异）
+        if (sv is None and cv is False) or (sv is False and cv is None):
+            continue
+        if sv != cv:
+            mismatches.append(k)
+    return mismatches
 
 
 def _backup_checkpoint_to_backup_dir(path: str, backup_dir) -> str:
@@ -1105,20 +1144,31 @@ def _backup_checkpoint_to_backup_dir(path: str, backup_dir) -> str:
 
 
 def migrate_old_checkpoints():
-    """自动迁移旧格式检查点到新分层目录（按变体分子目录）"""
+    """自动迁移旧格式检查点到新分层目录
+
+    两级目录结构：checkpoints/{variant}/{subdir}/
+    - subdir 由 task_id 映射得到（baseline/gated/coord/staged/triple/cutmix 等）
+    - 文件名简化为 {task}_off{offset}_{best|last}.pt
+    """
     import shutil
     from pathlib import Path as _Path
+
+    # task_id → subdir 映射（A组用 baseline，B/C组用优化类型）
+    _TASK_SUBDIR_MAP = {
+        'A1': 'baseline', 'A2': 'baseline', 'A3': 'baseline', 'A4': 'baseline', 'A5': 'baseline',
+        'B1': 'gated', 'B2': 'coord', 'B3': 'staged', 'B4': 'triple', 'B5': 'cutmix',
+        'C1': 'gated_coord', 'C2': 'staged_coord', 'C3': 'full',
+    }
+
     # 从文件名末尾解析：prefix_task_offN_best.pt
     # 例如: resnet18_resnet18_cnn_detection_off0_best.pt
     known_tasks = ['detection', 'segmentation', 'multitask']
-    # 已知的带下划线的 variant（用于从前缀中提取正确的 variant 名）
     known_variant_prefixes = ['swin_yolo_patchtst', 'swin_yolo', 'vit_yolo', 'resnet18', 'detr']
 
     def _extract_variant_from_prefix(prefix: str) -> str:
         """从文件名前缀提取 variant 名"""
-        for vp in sorted(known_variant_prefixes, key=len, reverse=True):  # 长优先匹配
+        for vp in sorted(known_variant_prefixes, key=len, reverse=True):
             if prefix.startswith(vp):
-                # 确认后面是下划线分隔的（避免 resnet18_resnet18_cnn 被匹配为 resnet18）
                 rest = prefix[len(vp):]
                 if not rest or rest.startswith('_'):
                     return vp
@@ -1141,39 +1191,87 @@ def migrate_old_checkpoints():
     for file in list(_Path(CHECKPOINT_DIR).rglob('*.pt')):
         if 'backup' in file.parts:
             continue
+
+        # 从元数据读取 task_id，推导 subdir
+        task_id = None
+        subdir = ''
+        try:
+            ckpt = torch.load(str(file), map_location='cpu', weights_only=False)
+            if isinstance(ckpt, dict):
+                task_id = ckpt.get('task_id')
+                if task_id:
+                    subdir = _TASK_SUBDIR_MAP.get(task_id, 'baseline')
+                else:
+                    subdir = 'baseline'  # 无 task_id 时默认放 baseline
+        except Exception:
+            pass
+
+        # 从文件名解析 variant
         parsed = parse_old_filename(file.name)
+        variant = None
         if parsed:
-            prefix, task, offset, ctype = parsed
+            prefix = parsed[0]
             variant = _extract_variant_from_prefix(prefix)
-            target_dir = _Path(CHECKPOINT_DIR) / variant
-            target_dir.mkdir(exist_ok=True)
-            new_name = f"{variant}_{task}_off{offset}_{ctype}.pt"
-            target_path = target_dir / new_name
-            if file.resolve() == target_path.resolve():
-                continue  # 已在正确位置，跳过
-            if target_path.exists():
-                backup = target_path.with_suffix(f'.conflict_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pt')
-                shutil.copy2(str(target_path), str(backup))
-                target_path.unlink()
-            shutil.copy2(str(file), str(target_path))
-            file.unlink()
-            print_info(f"已迁移旧检查点: {file.name} → {variant}/{new_name}")
         else:
-            match_new = new_pattern.match(file.name)
-            if match_new:
-                variant = match_new.group('variant')
-                target_dir = _Path(CHECKPOINT_DIR) / variant
-                target_dir.mkdir(exist_ok=True)
-                target_path = target_dir / file.name
-                if file.resolve() == target_path.resolve():
-                    continue  # 已在正确位置，跳过
-                if target_path.exists():
-                    backup = target_path.with_suffix(f'.conflict_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pt')
-                    shutil.copy2(str(target_path), str(backup))
-                    target_path.unlink()
-                shutil.copy2(str(file), str(target_path))
-                file.unlink()
-                print_info(f"已自动归类: {file.name} → {variant}/")
+            m = new_pattern.match(file.name)
+            if m:
+                variant = m.group('variant')
+
+        if not variant:
+            # 兜底：文件名可能直接是 {task}_off{offset}_{type}.pt（无 variant 前缀）
+            # 从父目录名推断 variant
+            if len(file.parts) >= 2:
+                variant = file.parts[-2]  # 父目录名即为 variant
+
+        if not variant or variant not in known_variant_prefixes:
+            continue
+
+        target_dir = _Path(CHECKPOINT_DIR) / variant / subdir
+        target_dir.mkdir(exist_ok=True)
+
+        # 提取 task 和 offset 从文件名（通用）
+        task_m = new_pattern.match(file.name)
+        if not task_m:
+            # 尝试提取 task/offset/type（兼容 conflict 文件和旧格式）
+            task_m = re.search(
+                r'_(?P<task>detection|segmentation|multitask)_off(?P<offset>\d+)_(?P<type>best|last)\.pt$',
+                file.name
+            )
+        if not task_m:
+            # 兜底：直接搜索文件名中的 task/offset/type 模式（兼容无前缀格式）
+            task_m = re.search(
+                r'(?P<task>detection|segmentation|multitask)_off(?P<offset>\d+)_(?P<type>best|last)(?:\.conflict_\d+)?\.pt$',
+                file.name
+            )
+
+        task = task_m.group('task')
+        offset = task_m.group('offset')
+        ctype = task_m.group('type')
+        new_name = f"{task}_off{offset}_{ctype}.pt"
+        target_path = target_dir / new_name
+
+        if file.resolve() == target_path.resolve():
+            continue  # 已在正确位置，跳过
+        if target_path.exists():
+            backup = target_path.with_suffix(f'.conflict_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pt')
+            shutil.copy2(str(target_path), str(backup))
+            target_path.unlink()
+        shutil.copy2(str(file), str(target_path))
+        try:
+            file.unlink()
+        except OSError:
+            pass  # 删除失败不影响迁移结果
+        print_info(f"已迁移: {file.name} → {variant}/{subdir}/{new_name}")
+
+    # 清理空的历史遗留目录（只检查变体顶级目录下的空子目录）
+    known_variants = ['resnet18', 'swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
+    for variant_dir in _Path(CHECKPOINT_DIR).iterdir():
+        if not variant_dir.is_dir() or variant_dir.name == 'backup':
+            continue
+        for sub in variant_dir.iterdir():
+            if sub.is_dir() and not any(sub.rglob('*.pt')):
+                shutil.rmtree(str(sub))
+                print_info(f"已清理空子目录: {variant_dir.name}/{sub.name}/")
 
 
 def train_model(model, train_loader, test_loader, config, device, checkpoint_path=None, task_id=None):
@@ -1191,6 +1289,22 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
     last_checkpoint_path = None
     if checkpoint_path and checkpoint_path.endswith('_best.pt'):
         last_checkpoint_path = checkpoint_path[:-8] + '_last.pt'
+
+    # 异步保存线程：减少训练主循环的 I/O 阻塞
+    from concurrent.futures import ThreadPoolExecutor
+    _save_executor = ThreadPoolExecutor(max_workers=1)
+    _save_queue = []
+
+    # 跟踪最后一个 epoch 的实际保存路径（供 _mark_checkpoint_complete 使用）
+    _latest_best_path = None
+    _latest_last_path = None
+
+    def _async_save(data, path):
+        """提交异步保存（不阻塞主线程）"""
+        def _do_save():
+            torch.save(data, path)
+        future = _save_executor.submit(_do_save)
+        _save_queue.append(future)
 
     # 根据任务类型选择损失函数
     task = config.get('task', 'detection')
@@ -1674,22 +1788,26 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 import re
                 base = re.sub(r'_e\d+_', '_', checkpoint_path.rsplit('_best.pt', 1)[0])
                 best_save_path = f"{base}_e{best_epoch:03d}_best.pt"
-                torch.save(
+                _latest_best_path = best_save_path
+                _async_save(
                     _build_checkpoint_data(model, config, epoch, best_loss, 'improvement'),
                     best_save_path
                 )
+                print_info(f"  → 保存最佳模型: {os.path.basename(best_save_path)}")
         else:
             patience_counter += 1
 
-        # 每个 epoch 结束无条件保存兜底检查点（路径含 epoch 数）
+        # 每个 epoch 结束无条件保存兜底检查点（路径含 epoch 数，异步不阻塞）
         if last_checkpoint_path:
             import re
             base = re.sub(r'_e\d+_', '_', last_checkpoint_path.rsplit('_last.pt', 1)[0])
             last_save_path = f"{base}_e{epoch + 1:03d}_last.pt"
-            torch.save(
+            _latest_last_path = last_save_path
+            _async_save(
                 _build_checkpoint_data(model, config, epoch, best_loss, 'epoch_end'),
                 last_save_path
             )
+            print_info(f"  → 保存兜底模型: {os.path.basename(last_save_path)}")
 
         # 获取当前学习率
         current_lr = optimizer.param_groups[0]['lr']
@@ -1787,13 +1905,15 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
 
         if patience_counter >= config['patience']:
             print_warning(f"早停: 连续 {config['patience']} 个epoch未改善")
-            _mark_checkpoint_complete(checkpoint_path, last_checkpoint_path)
+            _mark_checkpoint_complete(_latest_best_path, _latest_last_path, _async_save)
             break
 
     total_time = time.time() - start_time
     print_info(f"训练完成! 总时间: {total_time:.1f}s ({total_time/60:.1f}min)")
     # 标记检查点为已完成（正常结束）
-    _mark_checkpoint_complete(checkpoint_path, last_checkpoint_path)
+    _mark_checkpoint_complete(_latest_best_path, _latest_last_path, _async_save)
+    # 等待所有异步保存完成后再返回
+    _save_executor.shutdown(wait=True)
     return model, {'val_loss': best_loss}
 
 
@@ -1823,20 +1943,23 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
     if task_id:
         config['task_id'] = task_id
 
-    # 分层目录：checkpoints/{variant}/
-    # 格式：{variant}_{task}_off{offset}_{best|last}.pt
-    ckpt_subdir = os.path.join(CHECKPOINT_DIR, variant_key)
+    # 分层目录：checkpoints/{variant}/{subdir}/
+    # 子目录由 --subdir 参数指定（baseline/gated/coord 等），默认取 config['subdir']
+    ckpt_subdir_name = config.get('subdir', '')
+    ckpt_subdir = os.path.join(CHECKPOINT_DIR, variant_key, ckpt_subdir_name) if ckpt_subdir_name \
+        else os.path.join(CHECKPOINT_DIR, variant_key)
     backup_subdir = os.path.join(CHECKPOINT_DIR, 'backup')
     os.makedirs(ckpt_subdir, exist_ok=True)
     os.makedirs(backup_subdir, exist_ok=True)
 
+    # 文件名：{task}_off{offset}_{best|last}.pt（variant 和 subdir 已在路径中）
     save_path = os.path.join(
         ckpt_subdir,
-        f"{variant_key}_{task}_off{predict_offset}_best.pt"
+        f"{task}_off{predict_offset}_best.pt"
     )
     last_save_path = os.path.join(
         ckpt_subdir,
-        f"{variant_key}_{task}_off{predict_offset}_last.pt"
+        f"{task}_off{predict_offset}_last.pt"
     )
 
     # ========== 模型实例化（根据变体类型）==========
@@ -1936,7 +2059,7 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
         return old if os.path.exists(old) else None
 
     # 构造不含 epoch 的基础路径（用于 glob 查找最新文件）
-    base_path = os.path.join(ckpt_subdir, f"{variant_key}_{task}_off{predict_offset}")
+    base_path = os.path.join(ckpt_subdir, f"{task}_off{predict_offset}")
     save_path = _find_latest_epoch_file(base_path, 'best')
     last_save_path = _find_latest_epoch_file(base_path, 'last')
 
@@ -1952,11 +2075,12 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
         mismatches = _check_signature_mismatch(saved_config, config)
 
         if mismatches:
-            # 配置不匹配：备份 + 强制重训
-            print_warning(f"[WARN] 配置已变更，跳过旧检查点")
-            print_warning(f"   变更字段: {', '.join(mismatches)}")
+            # 配置不匹配：备份旧检查点，重新训练（静默处理）
+            print_info(f"[INFO] 配置已变更，从头训练")
+            print_info(f"   变更字段: {', '.join(mismatches)}")
             _backup_checkpoint_to_backup_dir(save_path, backup_subdir)
             _backup_checkpoint_to_backup_dir(last_save_path, backup_subdir)
+            config['_is_retrain'] = True
             model = create_variant_model()
             start_epoch = 0
             best_metric = float('inf')
@@ -1987,14 +2111,15 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
             best_metric = checkpoint.get('best_loss', float('inf'))
 
     # Case 4b: 无 best.pt 但有 last.pt → 从崩溃恢复
-    elif os.path.exists(last_save_path):
+    elif last_save_path and os.path.exists(last_save_path):
         checkpoint = torch.load(last_save_path, map_location=device, weights_only=False)
         saved_config = checkpoint.get('config', {})
         mismatches = _check_signature_mismatch(saved_config, config)
 
         if mismatches:
-            print_warning(f"[WARN] last.pt 配置不匹配，强制重训")
+            print_info(f"[INFO] last.pt 配置已变更，从头训练")
             _backup_checkpoint_to_backup_dir(last_save_path, backup_subdir)
+            config['_is_retrain'] = True
             model = create_variant_model()
             start_epoch = 0
             best_metric = float('inf')
@@ -2010,6 +2135,11 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
     else:
         print_info(f"[NEW] 未找到检查点，从头训练")
         model = create_variant_model()
+        # 构造基础路径供 train_model 保存使用
+        if not save_path:
+            save_path = os.path.join(ckpt_subdir, f"{task}_off{predict_offset}_best.pt")
+        if not last_save_path:
+            last_save_path = os.path.join(ckpt_subdir, f"{task}_off{predict_offset}_last.pt")
 
     # =========================================
 
@@ -2072,9 +2202,6 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
 # =============================================================================
 
 def main():
-    # 自动迁移旧格式检查点到新分层目录
-    migrate_old_checkpoints()
-
     parser = argparse.ArgumentParser(description='PE-MMNet v4 统一训练脚本')
 
     # 模式
@@ -2157,6 +2284,8 @@ def main():
                         help='强制重新训练，即使检查点已存在')
     parser.add_argument('--task_id', type=str, default=None,
                         help='任务ID（用于检查点标记，团队协作时使用）')
+    parser.add_argument('--subdir', type=str, default='',
+                        help='检查点子目录（团队协作时使用，如 baseline/gated/coord 等）')
 
     # 分阶段训练
     parser.add_argument('--staged_train', action='store_true', default=False,
@@ -2237,6 +2366,7 @@ def main():
         # 检查点控制
         'force_retrain': args.force_retrain,
         'resume': args.resume,
+        'subdir': args.subdir,
         'variant': args.variant,  # 用于 train_model 选择损失函数
         # 记录原始值用于追溯
         'final_image_size': auto_config['image_size'],

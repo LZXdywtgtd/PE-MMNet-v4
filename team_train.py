@@ -298,36 +298,28 @@ def get_hardware_level():
 
 
 def get_completed_tasks():
-    """扫描 checkpoints/ 目录（含子目录），识别已完成的任务
+    """扫描 checkpoints/ 目录（含子目录），通过元数据 task_id 识别已完成的任务。
 
-    支持新分层目录结构（checkpoints/{variant}/best.pt）和旧格式。
-    优先从检查点元数据中读取 task_id，兼容文件名解析作为备用。
     跳过 backup/ 目录。
+    完成判定：is_complete=True 或 is_retrain_done=True（有 epoch 记录）。
     """
     completed = set()
     if not CHECKPOINT_DIR.exists():
         return completed
 
     for ckpt_file in CHECKPOINT_DIR.rglob('*_best.pt'):
-        # 跳过 backup 目录
         if 'backup' in ckpt_file.parts:
             continue
-        task_id = None
-
-        # 方法1: 从元数据读取 task_id（优先）
         try:
             checkpoint = torch.load(ckpt_file, map_location='cpu', weights_only=False)
-            if isinstance(checkpoint, dict) and 'task_id' in checkpoint:
-                task_id = checkpoint['task_id']
-        except Exception as e:
+            if isinstance(checkpoint, dict):
+                task_id = checkpoint.get('task_id')
+                if task_id and task_id in all_tasks:
+                    # is_complete=True 或配置变化后重新训练完成
+                    if checkpoint.get('is_complete', False) or checkpoint.get('is_retrain_done', False):
+                        completed.add(task_id)
+        except Exception:
             pass
-
-        # 方法2: 从文件名解析（增强版）
-        if task_id is None:
-            task_id = parse_task_id_from_filename(ckpt_file.name, all_tasks)
-
-        if task_id and task_id in all_tasks:
-            completed.add(task_id)
 
     return completed
 
@@ -469,8 +461,10 @@ def run_training_task(task_id: str) -> bool:
     print(f"任务ID: {task_id}")
     print(f"{'=' * 60}\n")
 
-    # 添加 --task_id 参数以便检查点记录任务ID
-    cmd = f'py "{RUN_TRAIN}" --mode train {task["args"]} --task_id {task_id}'
+    # 添加 --task_id 和 --subdir 参数以便检查点记录任务ID和路径
+    subdir = task.get('subdir', '')
+    cmd = f'py "{RUN_TRAIN}" --mode train {task["args"]} --task_id {task_id}' + \
+          (f' --subdir {subdir}' if subdir else '')
     print(f"执行命令: {cmd}\n")
 
     result = os.system(cmd)
@@ -484,122 +478,56 @@ def run_training_task(task_id: str) -> bool:
 
 
 def _get_task_checkpoint_info(task_id: str) -> dict:
-    """获取任务的检查点信息（epoch、is_complete）"""
-    task = all_tasks.get(task_id, {})
-    args_str = task.get('args', '')
-    variant = _extract_arg(args_str, '--variant') or 'resnet18'
-    task_mode = _extract_arg(args_str, '--task') or 'detection'
-    offset = _extract_arg(args_str, '--predict_offset') or '0'
+    """获取任务的检查点信息（epoch、is_complete）
 
-    # 新格式路径：checkpoints/{variant}/{variant}_{task}_off{offset}_best.pt
-    subdir = CHECKPOINT_DIR / variant
-    new_best = subdir / f"{variant}_{task_mode}_off{offset}_best.pt"
-    new_last = subdir / f"{variant}_{task_mode}_off{offset}_last.pt"
+    扫描所有 checkpoint 文件，通过元数据 task_id 匹配。
+    is_complete 判定：is_complete=True 或 is_retrain_done=True（有 epoch 记录）。
+    """
+    if not CHECKPOINT_DIR.exists():
+        return {'epoch': 0, 'is_complete': False, 'best_epoch': 0, 'last_epoch': 0, 'path': None}
 
-    # 旧格式路径：checkpoints/{variant}_{backbone2d}_{backbone1d}/{variant}_{...}_task{...}_offset{...}_best.pt
-    # variant 本身可能带下划线（如 swin_yolo_patchtst），目录名通常等于 variant 名
-    old_subdir = CHECKPOINT_DIR / variant
-    old_best = old_subdir / f"{variant}_{task_mode}_offset{offset}_best.pt"
-    old_last = old_subdir / f"{variant}_{task_mode}_offset{offset}_last.pt"
-    # 备用旧格式（variant 作为前缀，如 resnet18_resnet18_cnn/）
-    old_best_alt = old_subdir / f"{variant}_{task_mode}_offset{offset}_best.pt"
-    old_last_alt = old_subdir / f"{variant}_{task_mode}_offset{offset}_last.pt"
+    best_epoch = 0
+    last_epoch = 0
+    best_path = None
+    last_path = None
+    is_complete = False
 
-    # 旧格式更复杂：子目录名等于 variant（如 resnet18_resnet18_cnn），文件前缀也是 variant
-    # 但 variant 内部下划线导致目录名和文件名前缀相同（如 resnet18_resnet18_cnn）
-    # 对 swin_yolo：目录名=swin_yolo，文件前缀=swin_yolo_patchtst_resnet18_cnn...
-    # 对 detr：目录名=detr_resnet18_cnn，文件前缀=detr_resnet18_cnn
-    # 对 resnet18：目录名=resnet18_resnet18_cnn，文件前缀=resnet18_resnet18_cnn
-    # 对 swin_yolo_patchtst：目录名=swin_yolo_patchtst_resnet18_cnn，文件前缀=swin_yolo_patchtst_resnet18_cnn
-    # 统一策略：在 variant 子目录下找 _task{}_off{}_best.pt 结尾的文件
-    old_task_pattern = re.compile(
-        rf'^{re.escape(variant)}.*_{re.escape(task_mode)}_off{re.escape(offset)}_(?:_e\d+_)?(best|last)\.pt$'
-    )
-
-    def load_ckpt(path):
-        if path.exists():
-            try:
-                ckpt = torch.load(path, map_location='cpu', weights_only=False)
-                return {
-                    'epoch': ckpt.get('epoch', 0),
-                    'is_complete': ckpt.get('is_complete', False),
-                    'path': str(path)
-                }
-            except Exception:
-                pass
-        return None
-
-    # 收集所有匹配的文件（best 和 last），取最大 epoch 和综合 is_complete
-    # 新格式：{prefix}_e{epoch:03d}_best.pt，旧格式：{prefix}_best.pt
-    all_results = []
-
-    # 1. 新格式优先（直接路径查找）
-    for path in [new_best, new_last]:
-        result = load_ckpt(path)
-        if result:
-            all_results.append(result)
-
-    # 2. variant 子目录下扫描（匹配新旧两种格式）
-    if old_subdir.exists():
-        # 新格式：_e???_best.pt / _e???_last.pt
-        for ckpt_file in old_subdir.glob('*_e*_best.pt'):
-            if old_task_pattern.match(ckpt_file.name):
-                result = load_ckpt(ckpt_file)
-                if result:
-                    all_results.append(result)
-        for ckpt_file in old_subdir.glob('*_e*_last.pt'):
-            if old_task_pattern.match(ckpt_file.name):
-                result = load_ckpt(ckpt_file)
-                if result:
-                    all_results.append(result)
-        # 旧格式：_best.pt / _last.pt（无 epoch）
-        for ckpt_file in old_subdir.glob('*_best.pt'):
-            if 'e' in ckpt_file.stem and '_best' in ckpt_file.name:
-                continue  # 已在上面匹配
-            if old_task_pattern.match(ckpt_file.name):
-                result = load_ckpt(ckpt_file)
-                if result:
-                    all_results.append(result)
-        for ckpt_file in old_subdir.glob('*_last.pt'):
-            if 'e' in ckpt_file.stem and '_last' in ckpt_file.name:
-                continue
-            if old_task_pattern.match(ckpt_file.name):
-                result = load_ckpt(ckpt_file)
-                if result:
-                    all_results.append(result)
-
-    # 3. 回退：递归扫描所有子目录
-    for ckpt_file in CHECKPOINT_DIR.rglob('*_e*_best.pt'):
+    for ckpt_file in CHECKPOINT_DIR.rglob('*_best.pt'):
         if 'backup' in ckpt_file.parts:
             continue
-        if old_task_pattern.match(ckpt_file.name):
-            result = load_ckpt(ckpt_file)
-            if result:
-                all_results.append(result)
-    for ckpt_file in CHECKPOINT_DIR.rglob('*_e*_last.pt'):
+        try:
+            ckpt = torch.load(ckpt_file, map_location='cpu', weights_only=False)
+            if isinstance(ckpt, dict) and ckpt.get('task_id') == task_id:
+                ep = ckpt.get('epoch', 0)
+                if ep > best_epoch:
+                    best_epoch = ep
+                    best_path = str(ckpt_file)
+                if ckpt.get('is_complete', False) or ckpt.get('is_retrain_done', False):
+                    is_complete = True
+        except Exception:
+            pass
+
+    for ckpt_file in CHECKPOINT_DIR.rglob('*_last.pt'):
         if 'backup' in ckpt_file.parts:
             continue
-        if old_task_pattern.match(ckpt_file.name):
-            result = load_ckpt(ckpt_file)
-            if result:
-                all_results.append(result)
+        try:
+            ckpt = torch.load(ckpt_file, map_location='cpu', weights_only=False)
+            if isinstance(ckpt, dict) and ckpt.get('task_id') == task_id:
+                ep = ckpt.get('epoch', 0)
+                if ep > last_epoch:
+                    last_epoch = ep
+                    last_path = str(ckpt_file)
+                if ckpt.get('is_complete', False) or ckpt.get('is_retrain_done', False):
+                    is_complete = True
+        except Exception:
+            pass
 
-    if not all_results:
-        return {'epoch': 0, 'is_complete': False, 'path': None}
-
-    # 分别取 best 和 last 的 epoch，综合 is_complete
-    best_result = next((r for r in all_results if 'best.pt' in r['path']), None)
-    last_result = next((r for r in all_results if 'last.pt' in r['path']), None)
-    best_epoch = best_result['epoch'] if best_result else 0
-    last_epoch = last_result['epoch'] if last_result else 0
-    max_epoch = max(best_epoch, last_epoch)
-    any_complete = any(r['is_complete'] for r in all_results)
     return {
-        'epoch': max_epoch,
+        'epoch': max(best_epoch, last_epoch),
         'best_epoch': best_epoch,
         'last_epoch': last_epoch,
-        'is_complete': any_complete,
-        'path': last_result['path'] if last_result else (best_result['path'] if best_result else None)
+        'is_complete': is_complete,
+        'path': last_path or best_path
     }
 
 

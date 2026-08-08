@@ -1340,7 +1340,7 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=False,
         collate_fn=collate_fn_with_cutmix
     )
 
@@ -1349,7 +1349,7 @@ def create_multibatch_dataloaders(data_roots=None, batch_size=16,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=False
     )
 
     return train_loader, test_loader
