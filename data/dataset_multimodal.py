@@ -585,13 +585,11 @@ class PhysicalSafeTransform1D:
         if not self.enabled:
             return seq
         seq = seq.copy()
-        # 正确获取序列长度：对于 (3, 300) 取最后一维
         seq_len = seq.shape[-1]
         if np.random.random() < 0.3:
             mask_len = max(1, int(seq_len * self.mask_ratio))
             mask_start = np.random.randint(0, seq_len - mask_len)
-            seq[..., mask_start:mask_start + mask_len] = 0  # 对最后一维mask
-        # 正确生成噪声：只对最后一维（时间序列）加噪
+            seq[..., mask_start:mask_start + mask_len] = 0
         seq += np.random.randn(seq_len).astype(np.float32) * self.noise_std
         return seq
 

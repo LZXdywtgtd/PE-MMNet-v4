@@ -81,7 +81,7 @@ model = SwinYOLOFPN(
     dropout=0.2
 )
 
-# ViT-YOLO-FPN（grid_size固定16，image_size参数不影响网格数）
+# ViT-YOLO-FPN（grid_size 动态计算，至少 16）
 model = ViTYOLOFPN(
     seq_len=300,
     image_channels=2,
@@ -298,32 +298,38 @@ criterion = SegmentationLoss(
 )
 ```
 
-### DensityConsistencyLoss
+### YOLOTargetAssigner
 
-邻域平滑约束（仅正样本网格参与）。
+YOLO目标分配器（将标签分配到网格）。
 
 ```python
-from training.mono_loss import DensityConsistencyLoss
+from training.mono_loss import YOLOTargetAssigner
 
-loss_fn = DensityConsistencyLoss(
-    grid_size=16,             # 网格尺寸
-    neighbor_range=1,         # 邻域范围（1=3×3邻域）
-    lambda_consistency=0.5    # 一致性损失权重
-)
+assigner = YOLOTargetAssigner(grid_size=16, nearby_range=2)
+assigned_target, pos_mask = assigner(labels)
 ```
 
-### CombinedDensityLoss
+### HungarianMatcher
 
-组合密度损失（MSE + 一致性）。
+DETR 匈牙利匹配器。
 
 ```python
-from training.mono_loss import CombinedDensityLoss
+from training.mono_loss import HungarianMatcher
 
-criterion = CombinedDensityLoss(
-    grid_size=16,
-    neighbor_range=1,
-    lambda_mse=1.0,
-    lambda_consistency=0.5
+matcher = HungarianMatcher()
+indices = matcher(pred, {'labels': labels})
+```
+
+### MultimodalSegmentationLoss
+
+检测+分割联合损失（multitask模式）。
+
+```python
+from training.mono_loss import MultimodalSegmentationLoss
+
+criterion = MultimodalSegmentationLoss(
+    lambda_seg=1.0,
+    lambda_det=0.5
 )
 ```
 
@@ -493,6 +499,27 @@ model = freeze_model_backbone(
     freeze_1d=False,   # 保持1D骨干可训练
     freeze_names=None  # 可选：额外要冻结的参数名列表
 )
+```
+
+### NEW_VARIANTS
+
+模块级常量，标识所有新变体（返回 frozenset）。
+
+```python
+from run_train import NEW_VARIANTS
+# frozenset({'swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst'})
+is_new = 'swin_yolo' in NEW_VARIANTS
+```
+
+### _get_2d_backbone_name
+
+获取模型中2D骨干网络的属性名（兼容多种命名）。
+
+```python
+from run_train import _get_2d_backbone_name
+
+backbone_name = _get_2d_backbone_name(model)
+# 返回 'branch_2d'（resnet18）或 'backbone_2d'（YOLO/DETR）
 ```
 
 ### ETAEstimator

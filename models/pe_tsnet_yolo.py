@@ -576,8 +576,9 @@ class SwinYOLOFPNWithPatchTST(nn.Module):
         self.image_channels = image_channels
         self.image_size = image_size
         self.grid_size = grid_size
-        # 实际网格尺寸：YOLO Head 固定输出 grid_size×grid_size=16×16=256
-        self.actual_grid_size = grid_size  # = 16
+        # 动态计算网格尺寸：至少 16，大图可更大（与 ViTYOLO 保持一致）
+        computed_grid = image_size // 32
+        self.actual_grid_size = max(16, (computed_grid // 4) * 4)
         self.actual_num_grids = self.actual_grid_size ** 2
 
         # 2D 分支：Swin 骨干 + YOLO Head

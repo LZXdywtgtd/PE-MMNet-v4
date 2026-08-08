@@ -179,8 +179,7 @@ def auto_select_config(args):
     # 2. resnet18 等旧变体默认禁用（FP16 多epoch训练后易产生NaN）
     # 3. 新变体（swin_yolo, vit_yolo, detr）可启用 FP16
     variant = getattr(args, 'variant', 'resnet18')
-    new_variants = ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
-    is_new_variant = variant in new_variants
+    is_new_variant = variant in NEW_VARIANTS
 
     if args.no_fp16:
         fp16_enabled = False
@@ -348,6 +347,18 @@ class ModelCrossAttn(nn.Module):
 
 
 # 模型变体映射
+# 新变体标识（用于统一判断）
+NEW_VARIANTS = frozenset(['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst'])
+
+
+def _get_2d_backbone_name(model):
+    """获取模型中2D骨干网络的属性名（兼容多种命名）"""
+    for attr in ('branch_2d', 'backbone_2d'):
+        if hasattr(model, attr):
+            return attr
+    return None
+
+
 VARIANT_MODELS = {
     '1d_only': Model1DOnly,
     '2d_only': Model2DOnly,
@@ -415,7 +426,7 @@ def evaluate_model(model, device, data_roots=None, predict_offset=0,
     model.eval()
 
     # 判断是否为新变体（返回元组）
-    is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
+    is_new_variant = variant_key in NEW_VARIANTS
 
     all_preds, all_targets = [], []
 
@@ -604,7 +615,7 @@ def eval_checkpoint(checkpoint_path, device, image_size=None):
             fusion=saved_config.get('fusion', 'cross_attn'),
             seq_channels=saved_config.get('seq_channels', 1)
         )
-    elif variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']:
+    elif variant_key in NEW_VARIANTS:
         # YOLO/DETR 变体
         ModelClass = VARIANT_MODELS.get(variant_key, PETSNetMultimodal)
         model = ModelClass(
@@ -753,11 +764,7 @@ def staged_training(variant_key, config, device, data_roots=None, task_id=None):
 
     # 坐标注意力集成（与 train_variant 保持一致）
     if config.get('use_coord_attn'):
-        backbone_name = None
-        if hasattr(model, 'branch_2d'):
-            backbone_name = 'branch_2d'
-        elif hasattr(model, 'backbone_2d'):
-            backbone_name = 'backbone_2d'
+        backbone_name = _get_2d_backbone_name(model)
         if backbone_name:
             backbone = getattr(model, backbone_name)
             if hasattr(backbone, 'set_spatial_output'):
@@ -1284,7 +1291,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
         if fp16_enabled and not dry_run_fp16_disabled:
             with torch.amp.autocast('cuda'):
                 # 检查是否为新变体
-                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
+                is_new_variant = variant_key in NEW_VARIANTS
                 if is_new_variant:
                     grid_pred, global_density = model(seq_1d, img_2d)
                     if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
@@ -1311,7 +1318,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
         else:
             with torch.amp.autocast('cuda', enabled=False):
                 # 检查是否为新变体
-                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
+                is_new_variant = variant_key in NEW_VARIANTS
                 if is_new_variant:
                     grid_pred, global_density = model(seq_1d, img_2d)
                     if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
@@ -1354,7 +1361,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
             dry_run_fp16_disabled = True
 
             with torch.amp.autocast('cuda', enabled=False):
-                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
+                is_new_variant = variant_key in NEW_VARIANTS
                 if is_new_variant:
                     grid_pred, global_density = model(seq_1d, img_2d)
                     if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
@@ -1438,7 +1445,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 if fp16_enabled:
                     with torch.amp.autocast('cuda'):
                         # 检查是否为新变体
-                        is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
+                        is_new_variant = variant_key in NEW_VARIANTS
                         if is_new_variant:
                             grid_pred, global_density = model(seq_1d, img_2d)
                             if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
@@ -1470,7 +1477,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                     scaler.update()
                 else:
                     # 检查是否为新变体
-                    is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
+                    is_new_variant = variant_key in NEW_VARIANTS
                     if is_new_variant:
                         grid_pred, global_density = model(seq_1d, img_2d)
                         if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
@@ -1535,7 +1542,7 @@ def train_model(model, train_loader, test_loader, config, device, checkpoint_pat
                 else:
                     labels = labels.to(device)
                 # 检查是否为新变体
-                is_new_variant = variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']
+                is_new_variant = variant_key in NEW_VARIANTS
                 if is_new_variant:
                     if variant_key in ['swin_yolo', 'vit_yolo', 'swin_yolo_patchtst']:
                         # 临时切换到训练模式以获取完整网格预测计算有意义的验证损失
@@ -1849,7 +1856,7 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
                 fusion=config.get('fusion', 'cross_attn'),
                 seq_channels=seq_channels
             )
-        elif variant_key in ['swin_yolo', 'vit_yolo', 'detr', 'swin_yolo_patchtst']:
+        elif variant_key in NEW_VARIANTS:
             # YOLO/DETR 变体：传递 image_size 参数
             return ModelClass(
                 seq_len=config.get('feature_len', 300),
@@ -2010,15 +2017,9 @@ def train_variant(variant_key, config, device, data_roots=None, task_id=None, us
 
     # 坐标注意力集成
     if use_coord_attn:
-        backbone_name = None
-        if hasattr(model, 'branch_2d'):
-            backbone_name = 'branch_2d'
-        elif hasattr(model, 'backbone_2d'):
-            backbone_name = 'backbone_2d'
-
+        backbone_name = _get_2d_backbone_name(model)
         if backbone_name:
             backbone = getattr(model, backbone_name)
-            # 启用空间特征图输出，使 CoordAtt 能作用于 (B,C,H,W) 而非 (B,C)
             if hasattr(backbone, 'set_spatial_output'):
                 backbone.set_spatial_output(True)
             from models.pe_tsnet_multimodal import BackboneWithAttention
