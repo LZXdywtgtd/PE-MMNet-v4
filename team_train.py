@@ -511,9 +511,9 @@ def _get_task_checkpoint_info(task_id: str) -> dict:
     # 对 detr：目录名=detr_resnet18_cnn，文件前缀=detr_resnet18_cnn
     # 对 resnet18：目录名=resnet18_resnet18_cnn，文件前缀=resnet18_resnet18_cnn
     # 对 swin_yolo_patchtst：目录名=swin_yolo_patchtst_resnet18_cnn，文件前缀=swin_yolo_patchtst_resnet18_cnn
-    # 统一策略：在 variant 子目录下找 _task{}_offset{}_best.pt 结尾的文件
+    # 统一策略：在 variant 子目录下找 _task{}_off{}_best.pt 结尾的文件
     old_task_pattern = re.compile(
-        rf'^{re.escape(variant)}.+?_{re.escape(task_mode)}_offset{re.escape(offset)}_(?:_e\d+_)?(best|last)\.pt$'
+        rf'^{re.escape(variant)}.*_{re.escape(task_mode)}_off{re.escape(offset)}_(?:_e\d+_)?(best|last)\.pt$'
     )
 
     def load_ckpt(path):
@@ -705,10 +705,10 @@ def _print_progress_table(title=None, last_done=None, newly_unlocked=None):
             is_newly = task_id in (newly_unlocked or [])
             is_last = task_id == last_done
 
-            # 检查点信息：best:N/T last:N/T，N 和 T 固定3位宽（新任务时显示"新任务"）
+            # 检查点信息：best: N last: Y target: T
             if info['best_epoch'] > 0 or info['last_epoch'] > 0:
                 t = target_epochs
-                ckpt_txt = f"best:{info['best_epoch']:3d}/{t:3d} last:{info['last_epoch']:3d}/{t:3d}"
+                ckpt_txt = f"best:{info['best_epoch']:3d} last:{info['last_epoch']:3d} target:{t:3d}"
             else:
                 ckpt_txt = ""
 
