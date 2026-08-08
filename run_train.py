@@ -82,6 +82,34 @@ os.chdir(PROJECT_ROOT)
 import functools
 print = functools.partial(print, flush=True)
 
+# =============================================================================
+# Tee 类：同时输出到控制台和日志文件
+# =============================================================================
+
+import atexit
+
+
+class Tee:
+    """同时输出到控制台和日志文件，颜色码自动去除后写入文件"""
+
+    def __init__(self, filename: str):
+        self.file = open(filename, 'w', encoding='utf-8')
+        self.stdout = sys.stdout
+        self._ansi = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
+
+    def write(self, text: str):
+        self.stdout.write(text)
+        plain = self._ansi.sub('', text)
+        self.file.write(plain)
+        self.file.flush()
+
+    def flush(self):
+        self.stdout.flush()
+        self.file.flush()
+
+    def close(self):
+        self.file.close()
+
 from utils.config import ensure_config, get_data_root, get_checkpoints_dir, get_results_dir, get_data_batches
 from data.dataset_multimodal import create_multibatch_dataloaders
 from models.pe_tsnet_multimodal import (
@@ -2311,6 +2339,31 @@ def main():
     parser.add_argument('--eval_output', type=str, default=None, help='评估结果保存路径')
 
     args = parser.parse_args()
+
+    # === 日志重定向（train/eval 模式默认开启）===
+    if args.mode in ('train', 'eval'):
+        # 1. 先确保目录存在
+        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        # 2. 清理 7 天前的旧日志
+        now_ts = datetime.now().timestamp()
+        for f in os.listdir(log_dir):
+            fp = os.path.join(log_dir, f)
+            if os.path.isfile(fp) and now_ts - os.path.getmtime(fp) > 7 * 86400:
+                os.remove(fp)
+        # 3. 构造日志路径
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        suffix = '_eval' if args.mode == 'eval' else ''
+        task_id_part = args.task_id or 'unknown'
+        variant_part = args.variant or 'resnet18'
+        log_path = os.path.join(log_dir, f"{ts}_{task_id_part}_{variant_part}{suffix}.log")
+        # 4. 重定向
+        tee_out = Tee(log_path)
+        tee_err = Tee(log_path)
+        sys.stdout = tee_out
+        sys.stderr = tee_err
+        atexit.register(lambda: (tee_out.close(), tee_err.close()))
+    # =============================================
 
     # 跟踪用户显式指定的参数（用于 auto_select_config 决策）
     args._user_specified = {
