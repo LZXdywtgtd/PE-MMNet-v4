@@ -85,6 +85,8 @@ print = functools.partial(print, flush=True)
 # =============================================================================
 # Tee 类：同时输出到控制台和日志文件
 # =============================================================================
+import atexit
+
 
 class Tee:
     """同时输出到控制台和日志文件，颜色码自动去除后写入文件"""
@@ -93,18 +95,28 @@ class Tee:
         self.file = open(filename, 'w', encoding='utf-8')
         self._orig = sys.stdout  # 保存原始 stdout 引用
         self._ansi = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
+        self._closed = False
 
     def write(self, text: str):
+        if self._closed:
+            self._orig.write(text)
+            return
         self._orig.write(text)
         plain = self._ansi.sub('', text)
         self.file.write(plain)
         self.file.flush()
 
     def flush(self):
+        if self._closed:
+            self._orig.flush()
+            return
         self._orig.flush()
         self.file.flush()
 
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
         self.file.close()
 
 from utils.config import ensure_config, get_data_root, get_checkpoints_dir, get_results_dir, get_data_batches
@@ -799,8 +811,16 @@ def staged_training(variant_key, config, device, data_roots=None, task_id=None):
                 backbone, attention_type='coord', reduction=16))
             print_info(f"[OK] 坐标注意力已启用")
 
+    # 生成检查点路径（与 train_variant 保持一致）
+    task = config.get('task', 'detection')
+    predict_offset = config.get('predict_offset', 0)
+    ckpt_subdir = os.path.join(CHECKPOINT_DIR, variant_key)
+    os.makedirs(ckpt_subdir, exist_ok=True)
+    phase1_save_path = os.path.join(ckpt_subdir, f"{task}_off{predict_offset}_best.pt")
+    phase1_last_path = os.path.join(ckpt_subdir, f"{task}_off{predict_offset}_last.pt")
+
     # 阶段1训练
-    model, _ = train_model(model, train_loader_1, test_loader_1, phase1_config, device, task_id=task_id)
+    model, _ = train_model(model, train_loader_1, test_loader_1, phase1_config, device, phase1_save_path, task_id=task_id)
 
     # 阶段2: 长序列微调
     print_title("阶段2: 长序列微调")
@@ -834,7 +854,7 @@ def staged_training(variant_key, config, device, data_roots=None, task_id=None):
         phase2_config = config.copy()
         phase2_config['epochs'] = phase2_epochs
         phase2_config['patience'] = config['patience']
-        model, _ = train_model(model, train_loader_2, test_loader_2, phase2_config, device, task_id=task_id)
+        model, _ = train_model(model, train_loader_2, test_loader_2, phase2_config, device, phase1_save_path, task_id=task_id)
     else:
         print_info("阶段1已完成全部训练，跳过阶段2")
 
@@ -1071,10 +1091,8 @@ def _mark_checkpoint_complete(best_path, last_path, async_save_fn=None, task_id=
         # 补全缺失的 task_id（迁移后的旧检查点可能没有）
         if task_id and not ckpt.get('task_id'):
             ckpt['task_id'] = task_id
-        if async_save_fn:
-            async_save_fn(ckpt, path)
-        else:
-            torch.save(ckpt, path)
+        # 同步写入（不走异步队列）：必须确保 is_complete=True 落盘
+        torch.save(ckpt, path)
 
 
 def _select_best_query_detr(detr_pred, labels, device):
@@ -2359,6 +2377,7 @@ def main():
         tee_err = Tee(log_path)
         sys.stdout = tee_out
         sys.stderr = tee_err
+        atexit.register(lambda: (tee_out.close(), tee_err.close()))
     # =============================================
 
     # 跟踪用户显式指定的参数（用于 auto_select_config 决策）
